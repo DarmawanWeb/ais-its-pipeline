@@ -10,4 +10,6 @@
 !tsconfig.build.json
 !src/
 !migrations/
+!data/
 src/**/*.spec.ts
+src/**/__fixtures__/

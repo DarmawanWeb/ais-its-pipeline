@@ -1,0 +1,661 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/api/v2/ingest/ais": {
+      "post": {
+        "description": "Legacy `TimestampedAisMessage` or the normalized format. Each message is validated on its own: valid ones are published to AIS_RAW (source `pusher`, deduplicated by `<mmsi>:<positionTime>:<source>`), invalid ones are listed in `errors`. API keys need the `ais:ingest` scope; users must be platform administrators.",
+        "operationId": "IngestController_ingestReports",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/LegacyAisMessageDto"
+                      },
+                      {
+                        "$ref": "#/components/schemas/NormalizedAisMessageDto"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "array",
+                    "maxItems": 1000,
+                    "items": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/components/schemas/LegacyAisMessageDto"
+                        },
+                        {
+                          "$ref": "#/components/schemas/NormalizedAisMessageDto"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResultDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "summary": "Ingest AIS reports (one message or an array of ≤ 1000)",
+        "tags": [
+          "ingest"
+        ],
+        "x-api-key-scopes": [
+          "ais:ingest"
+        ]
+      }
+    },
+    "/api/v2/ingest/status": {
+      "get": {
+        "operationId": "StatusController_describe",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestStatusDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform administrator"
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Upstream connection states, pusher connections and rates (platform administrators)",
+        "tags": [
+          "ingest"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "AIS Maritime Intelligence — AIS ITS Pipeline: ingestor",
+    "description": "AIS ingestion (spec §13.2): REST and socket.io (`/api/v2/ingest/socket`, event `ais:data`, handshake `auth: { apiKey }` with scope `ais:ingest`) pushers and the upstream feeds, normalized into `ais.raw.received.v1` (stream AIS_RAW).",
+    "version": "0.1.0",
+    "contact": {}
+  },
+  "tags": [
+    {
+      "name": "ingest",
+      "description": "AIS report ingestion and feed status"
+    }
+  ],
+  "servers": [],
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "type": "http",
+        "description": "Access token (EdDSA JWT)"
+      },
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "API key sk_<id>_<secret>"
+      },
+      "internalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Internal-Token",
+        "description": "Service-to-service token"
+      }
+    },
+    "schemas": {
+      "LegacyAisDataDto": {
+        "type": "object",
+        "properties": {
+          "valid": {
+            "type": "boolean",
+            "description": "Ignored (legacy parity)"
+          },
+          "aistype": {
+            "type": "number",
+            "description": "AIS message type",
+            "example": 1
+          },
+          "mmsi": {
+            "description": "9-digit MMSI (string or number)",
+            "example": "525005141",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ]
+          },
+          "navstatus": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 15,
+            "example": 0
+          },
+          "lon": {
+            "type": "number",
+            "minimum": -180,
+            "maximum": 180,
+            "description": "181 = not available (rejected)",
+            "example": 116.05734
+          },
+          "lat": {
+            "type": "number",
+            "minimum": -90,
+            "maximum": 90,
+            "description": "91 = not available (rejected)",
+            "example": -8.7477733
+          },
+          "cog": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 360,
+            "description": "Course over ground [deg]",
+            "example": 0
+          },
+          "sog": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 102.3,
+            "description": "Speed over ground [kn]",
+            "example": 0.1
+          },
+          "hdg": {
+            "type": "number",
+            "description": "True heading [deg] 0..359, 511 = not available",
+            "example": 511
+          },
+          "utc": {
+            "type": "number",
+            "description": "Seconds subtracted from `timestamp` for the position time (legacy parity)",
+            "example": 24
+          }
+        },
+        "required": [
+          "mmsi",
+          "navstatus",
+          "lon",
+          "lat",
+          "cog",
+          "sog",
+          "hdg",
+          "utc"
+        ]
+      },
+      "LegacyAisEnvelopeDto": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/LegacyAisDataDto"
+          },
+          "port": {
+            "type": "string",
+            "description": "Receiver port",
+            "example": "COM3"
+          }
+        },
+        "required": [
+          "data"
+        ]
+      },
+      "LegacyAisMessageDto": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/LegacyAisEnvelopeDto"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "example": "2025-05-30T03:06:24.343Z"
+          }
+        },
+        "required": [
+          "message",
+          "timestamp"
+        ]
+      },
+      "NormalizedAisMessageDto": {
+        "type": "object",
+        "properties": {
+          "mmsi": {
+            "type": "number",
+            "description": "9-digit MMSI",
+            "example": 525005223
+          },
+          "navstatus": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 15,
+            "example": 0
+          },
+          "lat": {
+            "type": "number",
+            "minimum": -90,
+            "maximum": 90,
+            "example": -7.2
+          },
+          "lon": {
+            "type": "number",
+            "minimum": -180,
+            "maximum": 180,
+            "example": 112.73
+          },
+          "sog": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 102.3,
+            "example": 8.5
+          },
+          "cog": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 360,
+            "example": 91
+          },
+          "hdg": {
+            "type": "number",
+            "example": 90
+          },
+          "timestamp": {
+            "description": "ISO-8601 date-time or epoch milliseconds",
+            "example": "2026-11-21T08:30:00.000Z",
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "integer"
+              }
+            ]
+          },
+          "utc": {
+            "type": "number",
+            "description": "Seconds subtracted from `timestamp` (default 0)",
+            "example": 0
+          },
+          "aisType": {
+            "type": "number",
+            "nullable": true,
+            "example": 1
+          },
+          "receiverPort": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "mmsi",
+          "navstatus",
+          "lat",
+          "lon",
+          "sog",
+          "cog",
+          "hdg",
+          "timestamp"
+        ]
+      },
+      "IngestErrorDto": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "number",
+            "description": "Position of the message in the submitted array (0 for a single message)",
+            "example": 3
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "INVALID_MESSAGE",
+              "MISSING_FIELD",
+              "INVALID_TYPE",
+              "INVALID_MMSI",
+              "POSITION_NOT_AVAILABLE",
+              "OUT_OF_RANGE",
+              "INVALID_TIMESTAMP",
+              "FUTURE_TIMESTAMP"
+            ],
+            "example": "POSITION_NOT_AVAILABLE"
+          },
+          "field": {
+            "type": "string",
+            "nullable": true,
+            "example": "message.data.lat"
+          },
+          "message": {
+            "type": "string",
+            "example": "lat 91 means not available"
+          }
+        },
+        "required": [
+          "index",
+          "code",
+          "field",
+          "message"
+        ]
+      },
+      "IngestResultDto": {
+        "type": "object",
+        "properties": {
+          "accepted": {
+            "type": "number",
+            "description": "Valid reports stored (re-sent duplicates included)",
+            "example": 998
+          },
+          "rejected": {
+            "type": "number",
+            "example": 2
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IngestErrorDto"
+            }
+          }
+        },
+        "required": [
+          "accepted",
+          "rejected",
+          "errors"
+        ]
+      },
+      "SourceActivityDto": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "primary",
+              "batam",
+              "pusher"
+            ]
+          },
+          "received": {
+            "type": "number",
+            "description": "Reports received (every outcome)"
+          },
+          "published": {
+            "type": "number",
+            "description": "Stored in AIS_RAW"
+          },
+          "duplicates": {
+            "type": "number",
+            "description": "Re-sent reports JetStream dropped as duplicates"
+          },
+          "rejected": {
+            "type": "number",
+            "description": "Invalid reports"
+          },
+          "failed": {
+            "type": "number",
+            "description": "Publishes that failed"
+          },
+          "dropped": {
+            "type": "number",
+            "description": "Upstream reports dropped while too many publishes were pending"
+          },
+          "rateLimited": {
+            "type": "number",
+            "description": "Pushed reports refused by the per-connection rate limit"
+          },
+          "receivedLastMinute": {
+            "type": "number",
+            "description": "Rate: reports received in the last 60 s"
+          },
+          "lastReceivedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "required": [
+          "source",
+          "received",
+          "published",
+          "duplicates",
+          "rejected",
+          "failed",
+          "dropped",
+          "rateLimited",
+          "receivedLastMinute",
+          "lastReceivedAt"
+        ]
+      },
+      "UpstreamStatusDto": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "primary",
+              "batam"
+            ]
+          },
+          "endpoint": {
+            "type": "string",
+            "nullable": true,
+            "description": "Server endpoint (no credentials), null when disabled",
+            "example": "wss://ais.example.org"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "connecting",
+              "connected",
+              "disconnected",
+              "stopped"
+            ]
+          },
+          "connectedSince": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastDisconnectedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastError": {
+            "type": "string",
+            "nullable": true
+          },
+          "reconnectAttempts": {
+            "type": "number",
+            "description": "Reconnection attempts since the last successful connection"
+          },
+          "activity": {
+            "$ref": "#/components/schemas/SourceActivityDto"
+          }
+        },
+        "required": [
+          "source",
+          "endpoint",
+          "state",
+          "connectedSince",
+          "lastDisconnectedAt",
+          "lastError",
+          "reconnectAttempts",
+          "activity"
+        ]
+      },
+      "PushersStatusDto": {
+        "type": "object",
+        "properties": {
+          "connections": {
+            "type": "number",
+            "description": "Open socket.io pusher connections"
+          },
+          "activity": {
+            "$ref": "#/components/schemas/SourceActivityDto"
+          }
+        },
+        "required": [
+          "connections",
+          "activity"
+        ]
+      },
+      "IngestStatusDto": {
+        "type": "object",
+        "properties": {
+          "service": {
+            "type": "string",
+            "example": "ais-ingestor"
+          },
+          "version": {
+            "type": "string",
+            "example": "0.1.0"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "upstreams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UpstreamStatusDto"
+            }
+          },
+          "pushers": {
+            "$ref": "#/components/schemas/PushersStatusDto"
+          },
+          "pendingPublishes": {
+            "type": "number",
+            "description": "Upstream reports waiting for their JetStream ack"
+          }
+        },
+        "required": [
+          "service",
+          "version",
+          "at",
+          "upstreams",
+          "pushers",
+          "pendingPublishes"
+        ]
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Problem type URI"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "description": "Request path",
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$",
+            "description": "Stable UPPER_SNAKE_CASE error code"
+          },
+          "traceId": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "description": "Dot separated path, e.g. \"positions.0.lat\""
+                },
+                "message": {
+                  "type": "string"
+                },
+                "code": {
+                  "description": "Machine readable reason",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field",
+                "message"
+              ],
+              "additionalProperties": false,
+              "description": "Field-level validation error"
+            }
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code"
+        ],
+        "additionalProperties": {},
+        "description": "RFC 9457 problem details"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ]
+}

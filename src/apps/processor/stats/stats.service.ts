@@ -36,15 +36,16 @@ export class StatsService {
       this.repository.activeVessels(new Date(now.getTime() - ACTIVE_WINDOW_MS)),
       this.repository.recordedPositions(new Date(now.getTime() - 60_000)),
     ]);
-    const bySource = Object.fromEntries(
-      AIS_SOURCES.map((source) => [
-        source,
-        {
-          activeVessels: active.get(source) ?? 0,
-          messagesLastMinute: recorded.get(source) ?? 0,
-        },
-      ]),
-    ) as Record<AisSource, FeedStats>;
+    const feed = (source: AisSource): FeedStats => ({
+      activeVessels: active.get(source) ?? 0,
+      messagesLastMinute: recorded.get(source) ?? 0,
+    });
+    // Every feed, also those without traffic (a new AisSource fails to compile here).
+    const bySource: Record<AisSource, FeedStats> = {
+      primary: feed('primary'),
+      batam: feed('batam'),
+      pusher: feed('pusher'),
+    };
     const total = (pick: (stats: FeedStats) => number): number =>
       AIS_SOURCES.reduce((sum, source) => sum + pick(bySource[source]), 0);
     return {

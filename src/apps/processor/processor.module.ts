@@ -4,6 +4,7 @@ import { NatsModule } from '@darmawanweb/ais-its-nest/nats';
 import { RedisModule } from '@darmawanweb/ais-its-nest/redis';
 import { Module } from '@nestjs/common';
 
+import { SERVICE } from '../../shared/service.js';
 import * as schema from './db/schema.js';
 import { FleetModule } from './fleet/fleet.module.js';
 import { MethodologyModule } from './methodology/methodology.module.js';
@@ -19,7 +20,10 @@ import { StatsModule } from './stats/stats.module.js';
 @Module({
   imports: [
     // pg pool + drizzle (search_path=ais,public); migrations on boot.
-    DatabaseModule.forRoot({ schema }),
+    DatabaseModule.forRoot({
+      schema,
+      migrationsDir: SERVICE.processor.migrationsDir,
+    }),
     // The processor PRODUCES to AIS_POSITION; its consumers (ais-processor on
     // AIS_RAW, ais-processor-fleet on FLEET) never change those streams.
     NatsModule.forRoot({ streams: ['AIS_POSITION'] }),

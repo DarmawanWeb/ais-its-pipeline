@@ -7,6 +7,8 @@
 export const IMPLEMENTED_METHOD_IDS: readonly string[] = [
   // Ingestor and processor: normalization, position time, duplicate filter.
   'data.ais_ingest_rules',
+  // Ingestor: navstatus range and "not available" values of the validation.
+  'navstatus.ais_codes',
   // Processor: legacy haversine of the duplicate filter (contracts implementation).
   'geo.haversine_distance',
   'geo.coast_distance',

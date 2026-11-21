@@ -313,8 +313,10 @@ function receiverPortOf(value: unknown): string | null {
  * `valid` is ignored as in legacy; `aistype` and `port` are kept when well-formed.
  *
  * @method data.ais_ingest_rules
+ * @method navstatus.ais_codes (code ranges and "not available" values: navstatus 0..15, HDG 511, SOG 102.3 kn, COG 360°)
  * @returns the payload, or the first problem found
  * @see ../../../../../docs/METHODOLOGY.md#data.ais_ingest_rules
+ * @see ../../../../../docs/METHODOLOGY.md#navstatus.ais_codes
  * @see be-legacy/src/services/ais.service.ts (createOrUpdateAis), be-legacy/src/types/ais.type.ts
  */
 export function normalizeAisMessage(

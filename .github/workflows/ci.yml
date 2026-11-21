@@ -58,14 +58,14 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
-      # TimescaleDB/PostGIS and NATS containers through testcontainers (Docker is preinstalled).
+      # TimescaleDB/PostGIS, NATS and Valkey containers through testcontainers (Docker is preinstalled).
       - name: Integration tests
         run: pnpm test:int
 
       - name: Build
         run: pnpm build
 
-      - name: OpenAPI document is up to date
+      - name: OpenAPI documents are up to date (openapi.ingestor.json, openapi.processor.json)
         run: pnpm openapi:check
 
   image:

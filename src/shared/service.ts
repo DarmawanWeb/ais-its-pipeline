@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import * as z from 'zod';
@@ -13,6 +14,9 @@ const PackageJsonSchema = z.object({
 
 /** Root of the package (`src/shared` and `dist/shared` are two levels below it). */
 const PACKAGE_ROOT = new URL('../../', import.meta.url);
+
+/** {@link PACKAGE_ROOT} as a file-system path. */
+const ROOT = fileURLToPath(PACKAGE_ROOT);
 
 /** The repository's package.json. */
 function readPackageJson(): z.output<typeof PackageJsonSchema> {
@@ -37,7 +41,7 @@ export const SERVICE = Object.freeze({
   /** The release version: package.json is its single source. */
   version: packageJson.version,
   /** Absolute path of the package root (data files ship next to `dist/`). */
-  root: fileURLToPath(PACKAGE_ROOT),
+  root: ROOT,
   /** Stateless ingestion process (no database). */
   ingestor: Object.freeze({ name: 'ais-ingestor', port: 3003 }),
   /** Processing and query process; owns the PostgreSQL schema `ais`. */
@@ -45,5 +49,7 @@ export const SERVICE = Object.freeze({
     name: 'ais-processor',
     port: 3004,
     schema: 'ais',
+    /** SQL migrations of the schema, independent of the working directory. */
+    migrationsDir: join(ROOT, 'migrations'),
   }),
 });

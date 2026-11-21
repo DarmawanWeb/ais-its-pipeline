@@ -25,7 +25,8 @@ FROM positions
 GROUP BY bucket, mmsi
 WITH NO DATA;
 
-COMMENT ON MATERIALIZED VIEW positions_1m IS
+-- The user-facing relation of a continuous aggregate is a plain view.
+COMMENT ON VIEW positions_1m IS
   'One-minute track aggregate of positions (refreshed every minute over the last 2 days, kept 5 years)';
 
 -- Re-materializes the last two days every minute (late reports included);

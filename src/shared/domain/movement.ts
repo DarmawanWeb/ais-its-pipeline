@@ -46,6 +46,7 @@ export type MovementClass =
  * `previous` (spec §13.2).
  *
  * @method data.ais_ingest_rules
+ * @method geo.haversine_distance (legacy `calculateDistance`, R = 3438 nm, via contracts `legacyHaversineDistance`)
  * @param latest - latest recorded fix of the vessel, `null` when none
  * @param report - incoming fix
  * @param minDistanceM - threshold [m] (default 0.1)

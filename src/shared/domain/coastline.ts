@@ -247,6 +247,8 @@ export class CoastlineGeometry {
    * Builds the index from a GeoJSON FeatureCollection (legacy
    * `data/indonesia.json`, shipped as `data/coastline.geojson`).
    *
+   * @method data.indonesia_coastline (the "coastline" is the simplified Jawa Timur province polygon)
+   * @see ../../../../../docs/METHODOLOGY.md#data.indonesia_coastline
    * @throws {CoastlineFormatError} when the document is not a FeatureCollection of valid rings.
    */
   static fromGeoJson(json: unknown): CoastlineGeometry {
@@ -271,7 +273,7 @@ export class CoastlineGeometry {
         roundTrip.set(vectorToLngLat(vector), v * 2);
         if (i < ring.length - 1) {
           const next = ring[i + 1];
-          if (next !== undefined && next[0] === x && next[1] === y) {
+          if (next?.[0] === x && next[1] === y) {
             skippedSegments += 1;
           } else {
             starts.push(v);
