@@ -1,12 +1,17 @@
 import { AisRawReceivedV1Schema } from '@darmawanweb/ais-its-contracts/events';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { classifyMovement, type MovementClass } from './movement.js';
 import {
+  type AisUtcMode,
+  DEFAULT_MAX_POSITION_AGE_MS,
+  ituPositionTime,
   legacyPositionTime,
   MAX_FUTURE_SKEW_MS,
   normalizeAisMessage,
   parseMessageTimestamp,
   rawReportMessageId,
+  utcSecondLag,
 } from './normalize.js';
 
 const receivedAt = new Date('2025-05-30T03:06:30.000Z');
@@ -84,6 +89,7 @@ describe('normalizeAisMessage', () => {
         aisType: 1,
         receiverPort: 'COM3',
       },
+      utcSecondLagS: 0,
     });
     if (result.ok) {
       expect(AisRawReceivedV1Schema.safeParse(result.report).success).toBe(
@@ -264,6 +270,275 @@ describe('normalizeAisMessage', () => {
       expect(rejectionOf(input).code).toBe('INVALID_MESSAGE');
     },
   );
+});
+
+describe('normalizeAisMessage: position time plausibility', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['year 1', '0001-01-01T00:00:00Z'],
+    ['before 1970', '1960-06-01T00:00:00Z'],
+    ['a negative year', '-000001-01-01T00:00:00Z'],
+  ])(
+    'rejects a position time before 1970 (%s): no UUID v7 event id exists for it',
+    (_label, timestamp) => {
+      expect(rejectionOf(normalizedMessage({ timestamp }))).toMatchObject({
+        code: 'INVALID_TIMESTAMP',
+        field: 'timestamp',
+      });
+    },
+  );
+
+  it('rejects epoch seconds sent as milliseconds (January 1970) as stale, with a hint', () => {
+    const rejection = rejectionOf(normalizedMessage({ timestamp: 1700000000 }));
+    expect(rejection).toMatchObject({
+      code: 'STALE_TIMESTAMP',
+      field: 'timestamp',
+    });
+    expect(rejection.message).toContain('epoch milliseconds');
+  });
+
+  it('accepts position times up to the maximum age before the reception (default 24 h)', () => {
+    const oldest = new Date(receivedAt.getTime() - DEFAULT_MAX_POSITION_AGE_MS);
+    expect(
+      normalizeAisMessage(
+        normalizedMessage({ timestamp: oldest.toISOString() }),
+        {
+          source: 'pusher',
+          receivedAt,
+        },
+      ).ok,
+    ).toBe(true);
+    const older = new Date(oldest.getTime() - 1);
+    expect(
+      rejectionOf(normalizedMessage({ timestamp: older.toISOString() })),
+    ).toMatchObject({ code: 'STALE_TIMESTAMP' });
+  });
+
+  it('applies a configured maximum age', () => {
+    const twoHoursAgo = new Date(receivedAt.getTime() - 2 * 3_600_000);
+    const result = normalizeAisMessage(
+      normalizedMessage({ timestamp: twoHoursAgo.toISOString() }),
+      { source: 'pusher', receivedAt, maxPositionAgeMs: 3_600_000 },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      rejection: { code: 'STALE_TIMESTAMP' },
+    });
+  });
+
+  it('drops an aistype that is no safe integer instead of refusing the report', () => {
+    const result = normalizeAisMessage(
+      normalizedMessage({ aisType: 2 ** 60 }),
+      {
+        source: 'pusher',
+        receivedAt,
+      },
+    );
+    expect(result).toMatchObject({ ok: true, report: { aisType: null } });
+  });
+
+  it('lists a report its contract schema refuses as INVALID_MESSAGE instead of failing at publish time', () => {
+    const issue = {
+      code: 'custom' as const,
+      path: ['positionTime'],
+      message: 'Invalid ISO datetime',
+      input: undefined,
+    };
+    vi.spyOn(AisRawReceivedV1Schema, 'safeParse').mockReturnValueOnce({
+      success: false,
+      error: { issues: [issue] },
+    } as unknown as ReturnType<typeof AisRawReceivedV1Schema.safeParse>);
+
+    expect(rejectionOf(normalizedMessage())).toEqual({
+      code: 'INVALID_MESSAGE',
+      field: 'timestamp',
+      message:
+        'The report does not match ais.raw.received.v1: positionTime: Invalid ISO datetime',
+    });
+  });
+
+  it('returns the utc diagnostic of the report (lag of utc read as the ITU time stamp)', () => {
+    // timestamp 03:06:24.343, utc 24: the lag is 0 s.
+    expect(
+      normalizeAisMessage(legacyMessage(), { source: 'primary', receivedAt }),
+    ).toMatchObject({ ok: true, utcSecondLagS: 0 });
+    expect(
+      normalizeAisMessage(normalizedMessage(), {
+        source: 'pusher',
+        receivedAt,
+      }),
+    ).toMatchObject({ ok: true, utcSecondLagS: null });
+  });
+});
+
+describe('ituPositionTime (AIS_UTC_MODE=itu)', () => {
+  const at = (iso: string) => new Date(iso);
+
+  it.each([
+    [
+      'received 500 ms after the report',
+      '2025-05-30T10:00:10.500Z',
+      10,
+      '2025-05-30T10:00:10.000Z',
+    ],
+    [
+      'received in the next second',
+      '2025-05-30T10:00:11.200Z',
+      10,
+      '2025-05-30T10:00:10.000Z',
+    ],
+    [
+      'across the minute',
+      '2025-05-30T10:00:00.300Z',
+      59,
+      '2025-05-30T09:59:59.000Z',
+    ],
+    [
+      'across the hour and day',
+      '2025-05-31T00:00:01.000Z',
+      58,
+      '2025-05-30T23:59:58.000Z',
+    ],
+    [
+      'receiver clock 100 ms behind',
+      '2025-05-30T10:00:09.900Z',
+      10,
+      '2025-05-30T10:00:10.000Z',
+    ],
+    [
+      'receiver clock 5 s behind (tolerance)',
+      '2025-05-30T10:00:05.000Z',
+      10,
+      '2025-05-30T10:00:10.000Z',
+    ],
+    [
+      'beyond the tolerance: the previous minute',
+      '2025-05-30T10:00:04.000Z',
+      10,
+      '2025-05-30T09:59:10.000Z',
+    ],
+    ['delayed 50 s', '2025-05-30T10:00:50.000Z', 0, '2025-05-30T10:00:00.000Z'],
+  ])(
+    'reconstructs the time stamp second: %s',
+    (_label, timestamp, utc, expected) => {
+      expect(ituPositionTime(at(timestamp), utc).toISOString()).toBe(expected);
+    },
+  );
+
+  it.each([60, 61, 62, 63, 5.5, -1, 64])(
+    'keeps the message timestamp for utc %s (no time stamp second)',
+    (utc) => {
+      const timestamp = at('2025-05-30T10:00:10.500Z');
+      expect(ituPositionTime(timestamp, utc).getTime()).toBe(
+        timestamp.getTime(),
+      );
+    },
+  );
+
+  it('is selected by the normalizer context', () => {
+    const result = normalizeAisMessage(legacyMessage(), {
+      source: 'primary',
+      receivedAt,
+      utcMode: 'itu',
+    });
+    // timestamp 03:06:24.343, utc 24 → 03:06:24 (legacy: 03:06:00.343).
+    expect(result).toMatchObject({
+      ok: true,
+      report: { positionTime: '2025-05-30T03:06:24.000Z' },
+    });
+  });
+});
+
+describe('utcSecondLag', () => {
+  it.each([
+    ['2025-05-30T03:06:24.343Z', 24, 0],
+    ['2025-05-30T03:06:26.000Z', 24, 2],
+    ['2025-05-30T03:07:00.300Z', 59, 1],
+    ['2025-05-30T03:06:10.000Z', 30, 40],
+    ['2025-05-30T03:06:10.000Z', 60, null],
+    ['2025-05-30T03:06:10.000Z', 2.5, null],
+  ])('(%s, utc %s) → %s', (timestamp, utc, expected) => {
+    expect(utcSecondLag(new Date(timestamp), utc)).toBe(expected);
+  });
+});
+
+/**
+ * The reviewer's regression scenario (spec §13.2 open question): one vessel
+ * reporting every 10 s for an hour, received 50–500 ms later, with `utc`
+ * the ITU-R M.1371 time stamp (the UTC second of the report).
+ */
+describe('position time of consecutive 10 s reports when utc is the ITU time stamp', () => {
+  const start = Date.UTC(2026, 10, 22, 10, 0, 0);
+
+  function simulate(utcMode: AisUtcMode) {
+    let seed = 42;
+    const random = () => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31;
+      return seed / 2 ** 31;
+    };
+    let latest: { timeMs: number; lat: number; lon: number } | null = null;
+    const kinds: Record<MovementClass['kind'], number> = {
+      first: 0,
+      advance: 0,
+      stationary: 0,
+      same_time: 0,
+      out_of_order: 0,
+    };
+    const times: string[] = [];
+    for (let i = 0; i < 360; i += 1) {
+      const generatedMs = start + i * 10_000;
+      const timestamp = new Date(generatedMs + 50 + random() * 450);
+      const result = normalizeAisMessage(
+        legacyMessage(
+          {
+            utc: new Date(generatedMs).getUTCSeconds(),
+            lat: -7.2 + i * 0.0005,
+            lon: 112.7,
+          },
+          { timestamp: timestamp.toISOString() },
+        ),
+        { source: 'primary', receivedAt: timestamp, utcMode },
+      );
+      if (!result.ok) throw new Error(result.rejection.message);
+      const fix = {
+        timeMs: Date.parse(result.report.positionTime),
+        lat: result.report.lat,
+        lon: result.report.lon,
+      };
+      const movement = classifyMovement(latest, fix, 0.1);
+      kinds[movement.kind] += 1;
+      if (movement.kind === 'first' || movement.kind === 'advance') {
+        latest = fix;
+        times.push(result.report.positionTime);
+      }
+    }
+    return { kinds, times };
+  }
+
+  it('legacy reading (timestamp − utc s): times collapse to the start of each minute and most reports become out of order', () => {
+    const { kinds } = simulate('legacy');
+    expect(kinds.first + kinds.advance + kinds.out_of_order).toBe(360);
+    expect(kinds.out_of_order).toBeGreaterThan(150);
+  });
+
+  it('itu reading: every report advances, at the second it was generated', () => {
+    const { kinds, times } = simulate('itu');
+    expect(kinds).toEqual({
+      first: 1,
+      advance: 359,
+      stationary: 0,
+      same_time: 0,
+      out_of_order: 0,
+    });
+    expect(times).toEqual(
+      Array.from({ length: 360 }, (_, i) =>
+        new Date(start + i * 10_000).toISOString(),
+      ),
+    );
+  });
 });
 
 describe('legacyPositionTime', () => {

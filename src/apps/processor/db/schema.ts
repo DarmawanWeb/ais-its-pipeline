@@ -2,6 +2,7 @@
 // files in migrations/ create the objects; these definitions MUST mirror them
 // and only type the queries.
 import { geography } from '@darmawanweb/ais-its-nest/db';
+import { sql } from 'drizzle-orm';
 import * as pg from 'drizzle-orm/pg-core';
 
 /** The processor's PostgreSQL schema, owned by the role `ais_svc`. */
@@ -64,6 +65,32 @@ export const vesselRefs = serviceSchema.table(
     updatedAt: timestamptz('updated_at').notNull(),
   },
   (table) => [pg.unique('vessel_refs_vessel_id_key').on(table.vesselId)],
+);
+
+/**
+ * Transactional outbox of `ais.position.recorded.v1` (`0003_outbox.sql`, the
+ * kit's `outboxTableSql()`): written by the position batches, read and
+ * published by the kit's `OutboxRelay`.
+ */
+export const outbox = serviceSchema.table(
+  'outbox',
+  {
+    id: pg.uuid('id').primaryKey(),
+    type: pg.text('type').notNull(),
+    entityKey: pg.text('entity_key'),
+    data: pg.jsonb('data').notNull(),
+    createdAt: timestamptz('created_at').notNull().defaultNow(),
+    attempts: pg.integer('attempts').notNull().default(0),
+    lastError: pg.text('last_error'),
+    publishedAt: timestamptz('published_at'),
+    failedAt: timestamptz('failed_at'),
+  },
+  (table) => [
+    pg
+      .index('outbox_pending_idx')
+      .on(table.createdAt, table.id)
+      .where(sql`published_at IS NULL AND failed_at IS NULL`),
+  ],
 );
 
 /** One-minute continuous aggregate of `positions` (`0002_positions_1m.sql`). */

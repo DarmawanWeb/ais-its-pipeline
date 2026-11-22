@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   decodeLastPosition,
   encodeLastPosition,
+  LAST_POSITION_TIME_MS_FIELD,
   lastPositionKey,
+  SAVE_LAST_POSITION_SCRIPT,
 } from './last-position.codec.js';
 import type { RecordedPosition } from './recorded-position.js';
 
@@ -34,6 +36,18 @@ describe('last position codec', () => {
       predictedNavstatus: 0 as const,
     };
     expect(decodeLastPosition(encodeLastPosition(noCoast))).toEqual(noCoast);
+  });
+
+  it('stores the position time in epoch milliseconds for the monotonic save', () => {
+    expect(encodeLastPosition(position)).toMatchObject({
+      time: '2026-01-01T00:00:00.123Z',
+      [LAST_POSITION_TIME_MS_FIELD]: String(Date.UTC(2026, 0, 1, 0, 0, 0, 123)),
+    });
+    // The script compares that field and writes the hash only when it is older.
+    expect(SAVE_LAST_POSITION_SCRIPT).toContain(
+      `redis.call('HGET', KEYS[1], '${LAST_POSITION_TIME_MS_FIELD}')`,
+    );
+    expect(SAVE_LAST_POSITION_SCRIPT).toContain('stored >= incoming');
   });
 
   it('returns null for empty or malformed hashes', () => {

@@ -47,10 +47,26 @@ export interface PusherAck {
   };
 }
 
+/** How long a pusher should wait before retrying while the API-key introspection is unavailable [ms]. */
+export const PUSHER_AUTH_RETRY_AFTER_MS = 5000;
+
 /** Per-connection state. */
 interface Pusher {
-  readonly principal: ApiKeyPrincipal;
   readonly bucket: TokenBucket;
+  /** Last successful verification of the connection's key (epoch ms). */
+  verifiedAt: number;
+}
+
+/**
+ * Whether a failed key check refuses the key itself (`401 INVALID_API_KEY`:
+ * unknown, malformed or revoked; `403 INSUFFICIENT_SCOPE`) — as opposed to
+ * an unavailable introspection (`503`) or an unexpected failure.
+ */
+export function refusesKey(error: unknown): boolean {
+  return (
+    error instanceof DomainError &&
+    (error.status === 401 || error.status === 403)
+  );
 }
 
 /**
@@ -59,6 +75,14 @@ interface Pusher {
  * an array (≤ 1000), acknowledged with `{ accepted, rejected, errors }`.
  * Each connection is rate limited by a token bucket
  * (`INGEST_SOCKET_RATE_PER_S`, `INGEST_SOCKET_BURST`).
+ *
+ * The key is re-checked on every event (kit cache: 60 s). A refused key
+ * (401/403) disconnects the pusher; an unavailable introspection does not —
+ * socket.io clients never reconnect after a server-side disconnect, so an
+ * auth outage would drop every pusher for good. The connection's last
+ * verified key is used for `INGEST_SOCKET_AUTH_GRACE_S`, then events are
+ * refused as retryable (`SERVICE_UNAVAILABLE`, `retryAfterMs`) until the
+ * introspection answers again.
  *
  * `@Public()`: the kit's guard denies non-HTTP handlers otherwise; the
  * connection is authenticated by the handshake middleware instead.
@@ -76,6 +100,7 @@ export class PusherGateway
     OnGatewayDisconnect<Socket>
 {
   private readonly logger = new Logger(PusherGateway.name);
+  private lastAuthWarningAt = 0;
   private readonly pushers = new WeakMap<Socket, Pusher>();
   private readonly handshakes = new WeakMap<Socket, ApiKeyPrincipal>();
   private connections = 0;
@@ -109,11 +134,11 @@ export class PusherGateway
       return;
     }
     this.pushers.set(socket, {
-      principal,
       bucket: new TokenBucket(
         this.config.INGEST_SOCKET_RATE_PER_S,
         this.config.INGEST_SOCKET_BURST,
       ),
+      verifiedAt: Date.now(),
     });
     this.connections += 1;
     this.metrics.instruments.pusherConnections.set(this.connections);
@@ -152,14 +177,8 @@ export class PusherGateway
       );
     }
     const count = batch.messages.length;
-    try {
-      // Re-check the key (cached): revoked keys are refused and disconnected.
-      await this.authenticator.authenticate(socket.handshake);
-    } catch (error) {
-      socket.disconnect(true);
-      const problem = new PusherConnectError(error).data;
-      return refused(count, problem.code, problem.detail ?? problem.code);
-    }
+    const authProblem = await this.reverify(socket, pusher, count);
+    if (authProblem !== null) return authProblem;
     const waitMs = pusher.bucket.take(count);
     if (waitMs > 0) {
       this.ingest.countRateLimited('pusher', count);
@@ -182,6 +201,58 @@ export class PusherGateway
       if (!(error instanceof DomainError)) throw error;
       return refused(count, error.code, error.detail ?? error.title);
     }
+  }
+
+  /**
+   * Re-checks the connection's key; `null` when the event may proceed,
+   * else the acknowledgement refusing it.
+   */
+  private async reverify(
+    socket: Socket,
+    pusher: Pusher,
+    count: number,
+  ): Promise<PusherAck | null> {
+    try {
+      await this.authenticator.authenticate(socket.handshake);
+      pusher.verifiedAt = Date.now();
+      return null;
+    } catch (error) {
+      if (refusesKey(error)) {
+        // Unknown, revoked or out-of-scope key: refuse and disconnect.
+        socket.disconnect(true);
+        const problem = new PusherConnectError(error).data;
+        return refused(count, problem.code, problem.detail ?? problem.code);
+      }
+      const graceMs = this.config.INGEST_SOCKET_AUTH_GRACE_S * 1000;
+      const accepted = Date.now() - pusher.verifiedAt <= graceMs;
+      this.metrics.instruments.pusherAuthUnavailable.inc({
+        result: accepted ? 'grace' : 'refused',
+      });
+      this.warnAuthUnavailable(error, accepted);
+      if (accepted) return null;
+      const message =
+        'The API key cannot be verified right now; retry later (the connection stays open)';
+      return {
+        ...refused(count, 'SERVICE_UNAVAILABLE', message),
+        error: {
+          code: 'SERVICE_UNAVAILABLE',
+          message,
+          retryAfterMs: PUSHER_AUTH_RETRY_AFTER_MS,
+        },
+      };
+    }
+  }
+
+  private warnAuthUnavailable(error: unknown, accepted: boolean): void {
+    const now = Date.now();
+    if (now - this.lastAuthWarningAt < 10_000) return;
+    this.lastAuthWarningAt = now;
+    this.logger.warn(
+      `Pusher API keys cannot be re-checked (${error instanceof Error ? error.message : String(error)}): ` +
+        (accepted
+          ? `accepting connected pushers with their last verified key for up to ${this.config.INGEST_SOCKET_AUTH_GRACE_S} s`
+          : 'refusing their events as retryable'),
+    );
   }
 }
 

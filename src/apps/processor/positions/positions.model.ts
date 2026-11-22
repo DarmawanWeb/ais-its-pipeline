@@ -55,7 +55,9 @@ export interface Track {
   readonly resolution: TrackResolution;
   /** Simplification tolerance [m], `null` when not simplified. */
   readonly simplifyM: number | null;
-  /** More points exist than were returned (narrow the range or use `1m`). */
+  /** More points matched than were returned: the newest are kept. */
   readonly truncated: boolean;
+  /** When truncated: `to` of the request for the older rest of the range (1 ms before the first point). */
+  readonly remainingTo: Date | null;
   readonly points: readonly TrackPoint[];
 }

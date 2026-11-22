@@ -7,6 +7,10 @@ import {
 } from '@darmawanweb/ais-its-nest';
 import * as z from 'zod';
 
+import {
+  AIS_UTC_MODES,
+  DEFAULT_MAX_POSITION_AGE_MS,
+} from '../../shared/domain/normalize.js';
 import { SERVICE } from '../../shared/service.js';
 
 /** Schemes the upstream socket.io servers may use. */
@@ -36,6 +40,28 @@ export const ingestorConfigSchema = defineConfig({
   INGEST_SOCKET_BURST: envInteger(1, 10_000_000).default(2000),
   /** Upstream reports waiting for their publish ack before new ones are dropped. */
   INGEST_MAX_PENDING_PUBLISHES: envInteger(1, 1_000_000).default(10_000),
+  /**
+   * While the API-key introspection is unavailable, a connected pusher keeps
+   * sending with its last verified key for this long after that verification
+   * [s]; then its events are refused as retryable (`SERVICE_UNAVAILABLE`),
+   * the connection stays open. `0` refuses at once.
+   */
+  INGEST_SOCKET_AUTH_GRACE_S: envInteger(0, 86_400).default(300),
+  /**
+   * Reading of the upstream `utc` field: `legacy` (spec §13.2 parity,
+   * position time = timestamp − utc s) or `itu` (the ITU-R M.1371 time
+   * stamp, the UTC second of the report). Switch only once the provider
+   * confirmed the meaning; `aisits_ais_utc_second_lag_seconds` shows which
+   * reading the data fits.
+   */
+  AIS_UTC_MODE: z.enum(AIS_UTC_MODES).default('legacy'),
+  /**
+   * Oldest accepted position time before its reception [s]; older reports
+   * are rejected (`STALE_TIMESTAMP`). At most the 180-day raw retention.
+   */
+  INGEST_MAX_POSITION_AGE_S: envInteger(60, 180 * 86_400).default(
+    DEFAULT_MAX_POSITION_AGE_MS / 1000,
+  ),
 });
 
 /** Validated ingestor configuration. */

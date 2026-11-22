@@ -5,7 +5,7 @@ import {
   InjectDb,
 } from '@darmawanweb/ais-its-nest/db';
 import { Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.js';
 import type { TrackPoint, VesselLatest } from './positions.model.js';
@@ -113,7 +113,7 @@ export class PositionsRepository {
     return row === undefined ? null : toLatest(row);
   }
 
-  /** Raw positions in time order (at most `limit` rows). */
+  /** The newest `limit` raw positions of the range, in time order. */
   async rawTrack(range: TrackRange): Promise<TrackPoint[]> {
     const rows = await this.db
       .select({
@@ -135,15 +135,15 @@ export class PositionsRepository {
           lte(positions.time, range.to),
         ),
       )
-      .orderBy(asc(positions.time))
+      .orderBy(desc(positions.time))
       .limit(range.limit);
-    return rows.map(({ predNavstatus, ...row }) => ({
+    return rows.reverse().map(({ predNavstatus, ...row }) => ({
       ...row,
       predictedNavstatus: predNavstatus === 1 ? 1 : 0,
     }));
   }
 
-  /** One-minute buckets (continuous aggregate, real-time) in time order. */
+  /** The newest `limit` one-minute buckets of the range (continuous aggregate, real-time), in time order. */
   async minuteTrack(range: TrackRange): Promise<TrackPoint[]> {
     const rows = await this.db
       .select({
@@ -168,12 +168,14 @@ export class PositionsRepository {
           lte(positions1m.bucket, range.to),
         ),
       )
-      .orderBy(asc(positions1m.bucket))
+      .orderBy(desc(positions1m.bucket))
       .limit(range.limit);
-    return rows.map(({ predNavstatus, samples, sogAvg, sogMax, ...row }) => ({
-      ...row,
-      predictedNavstatus: predNavstatus === 1 ? 1 : 0,
-      minute: { samples, sogAvg, sogMax },
-    }));
+    return rows
+      .reverse()
+      .map(({ predNavstatus, samples, sogAvg, sogMax, ...row }) => ({
+        ...row,
+        predictedNavstatus: predNavstatus === 1 ? 1 : 0,
+        minute: { samples, sogAvg, sogMax },
+      }));
   }
 }

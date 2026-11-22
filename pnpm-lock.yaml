@@ -4,7 +4,7 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-pnpmfileChecksum: sha256-IENg8S0CFTMnp/ALe4ggnN0l3ijp7d5RLsvTRPTnwoo=
+pnpmfileChecksum: sha256-QpS+iXcRIXGxEZSUva4D/aW1BwiYW+BNkgB8ZpdZQUM=
 
 importers:
 
@@ -15,7 +15,7 @@ importers:
         version: 0.3.0
       '@darmawanweb/ais-its-nest':
         specifier: ^0.2.0
-        version: 0.2.0(fe56f24371c04c9a1348afbf756ed152)
+        version: 0.2.0(36fb5e4384f6e38a8c277ce1cb564b02)
       '@nestjs/common':
         specifier: ^12.5.1
         version: 12.6.0(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -283,7 +283,6 @@ packages:
       '@nestjs/platform-fastify': ^12.5.1
       '@nestjs/swagger': ^12.1.2
       '@nestjs/terminus': ^12.2.0
-      '@nestjs/testing': ^12.5.1
       class-transformer: ^0.5.1
       class-validator: ^0.15.1
       drizzle-orm: ^0.45.4
@@ -291,13 +290,8 @@ packages:
       pino-pretty: ^13.2.0
       reflect-metadata: ^0.2.2
       rxjs: ^7.8.2
-      testcontainers: ^12.2.2
     peerDependenciesMeta:
-      '@nestjs/testing':
-        optional: true
       pino-pretty:
-        optional: true
-      testcontainers:
         optional: true
 
   '@emnapi/core@2.0.0-beta.2':
@@ -4068,7 +4062,7 @@ snapshots:
       uuid: 14.0.3
       zod: 4.6.7
 
-  '@darmawanweb/ais-its-nest@0.2.0(fe56f24371c04c9a1348afbf756ed152)':
+  '@darmawanweb/ais-its-nest@0.2.0(36fb5e4384f6e38a8c277ce1cb564b02)':
     dependencies:
       '@darmawanweb/ais-its-contracts': 0.3.0
       '@fastify/cookie': 11.1.5
@@ -4111,9 +4105,7 @@ snapshots:
       rxjs: 7.8.2
       zod: 4.6.7
     optionalDependencies:
-      '@nestjs/testing': 12.6.0(@nestjs/common@12.6.0(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.6.0)
       pino-pretty: 13.2.0
-      testcontainers: 12.2.2(bare-buffer@3.7.3)
     transitivePeerDependencies:
       - pg-native
       - supports-color

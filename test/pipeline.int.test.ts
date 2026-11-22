@@ -1,14 +1,23 @@
+import { readFile } from 'node:fs/promises';
+
 import {
   type AisPositionRecordedV1,
   EVENT_TYPES,
   subjects,
 } from '@darmawanweb/ais-its-contracts/events';
+import { APP_CONFIG } from '@darmawanweb/ais-its-nest';
 import { makeTestVesselSnapshot } from '@darmawanweb/ais-its-nest/analytics';
 import { EventPublisher, NatsClient } from '@darmawanweb/ais-its-nest/nats';
 import { REDIS_CLIENT, type Redis } from '@darmawanweb/ais-its-nest/redis';
 import { waitFor } from '@darmawanweb/ais-its-nest/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { CoastlineService } from '../src/apps/processor/coastline/coastline.service.js';
+import type { ProcessorConfig } from '../src/apps/processor/config.js';
+import { LastPositionStore } from '../src/apps/processor/pipeline/last-position.store.js';
+import { PipelineMetrics } from '../src/apps/processor/pipeline/pipeline.metrics.js';
+import { PositionPipelineService } from '../src/apps/processor/pipeline/position-pipeline.service.js';
+import { PositionWriter } from '../src/apps/processor/pipeline/position-writer.js';
 import { LEGACY_GOLDENS } from '../src/shared/domain/__fixtures__/legacy-goldens.js';
 import { positionEventId } from '../src/shared/domain/event-id.js';
 import { calculatePredictedNavStatus } from '../src/shared/domain/navstatus.js';
@@ -27,6 +36,8 @@ import {
 
 const MOVING = 525005201;
 const ANCHORED = 525005202;
+const UNPUBLISHED = 525005203;
+const SHARED = 525005204;
 
 /** A whole second ten minutes ago (position times of this file). */
 const T0 = new Date(Math.floor(Date.now() / 1000) * 1000 - 10 * 60_000);
@@ -157,6 +168,7 @@ describe('processor: AIS_RAW → positions, vessel_latest, Valkey, AIS_POSITION'
     expect(migrations.rows.map((row) => row.name)).toEqual([
       'init',
       'positions_1m',
+      'outbox',
     ]);
 
     const hypertables = await processor.pool.query<{
@@ -191,6 +203,41 @@ describe('processor: AIS_RAW → positions, vessel_latest, Valkey, AIS_POSITION'
       ['positions_1m', 'policy_compression', '7 days'],
       ['positions_1m', 'policy_refresh_continuous_aggregate', '2 days'],
       ['positions_1m', 'policy_retention', '5 years'],
+    ]);
+  });
+
+  it('completes migration 0002 when it runs again after a partial apply (its no-transaction statements are idempotent)', async () => {
+    // A boot killed after the aggregate and its refresh policy were created.
+    await processor.pool.query(
+      `SELECT remove_retention_policy('positions_1m')`,
+    );
+    await processor.pool.query(
+      `SELECT remove_compression_policy('positions_1m')`,
+    );
+    const migration = await readFile(
+      new URL('../migrations/0002_positions_1m.sql', import.meta.url),
+      'utf8',
+    );
+    const statements = migration
+      .split(/;\s*$/m)
+      .filter((chunk) =>
+        chunk
+          .split('\n')
+          .some((line) => line.trim() !== '' && !line.trim().startsWith('--')),
+      );
+    expect(statements.length).toBeGreaterThanOrEqual(6);
+    // The next boot re-runs every statement, as the kit's migrator does.
+    for (const statement of statements) await processor.pool.query(statement);
+
+    const jobs = await processor.pool.query<{ proc_name: string }>(
+      `SELECT proc_name FROM timescaledb_information.jobs
+       WHERE hypertable_schema = 'ais' AND hypertable_name = 'positions_1m'
+       ORDER BY proc_name`,
+    );
+    expect(jobs.rows.map((job) => job.proc_name)).toEqual([
+      'policy_compression',
+      'policy_refresh_continuous_aggregate',
+      'policy_retention',
     ]);
   });
 
@@ -359,7 +406,170 @@ describe('processor: AIS_RAW → positions, vessel_latest, Valkey, AIS_POSITION'
     expect(events[0]?.data.coastDistanceM).toBe(MADURA?.meters);
   });
 
-  it('is idempotent: a fresh consumer replaying AIS_RAW changes neither rows, latest state nor events', async () => {
+  it('never loses the event of a committed position: the raw report is acknowledged with its event in the outbox, published once AIS_POSITION accepts messages again', async () => {
+    const { manager } = await processor.app.get(NatsClient).ready();
+    const original = await manager.streams.info('AIS_POSITION');
+    expect(original.state.messages).toBeGreaterThan(0);
+    // The reviewer's reproduction: the stream refuses every new message.
+    await manager.streams.update('AIS_POSITION', {
+      max_msgs: original.state.messages,
+      discard: 'new',
+    });
+    try {
+      // The first position of a new vessel (no Valkey state at all).
+      await ingest([
+        normalizedMessage({
+          mmsi: UNPUBLISHED,
+          lat: -7.1,
+          lon: 112.9,
+          sog: 6,
+          cog: 45,
+          hdg: 44,
+          timestamp: at(0),
+        }),
+      ]);
+      // Rows committed and the raw report acknowledged, the event pending in the outbox.
+      await drained(processor);
+      expect(await latestOf(processor, UNPUBLISHED)).toMatchObject({
+        time: at(0),
+      });
+      const pending = await waitFor(async () => {
+        const { rows } = await processor.pool.query<{
+          attempts: number;
+          published_at: Date | null;
+        }>('SELECT attempts, published_at FROM outbox WHERE id = $1', [
+          positionEventId(UNPUBLISHED, at(0)),
+        ]);
+        const row = rows[0];
+        return row !== undefined && row.attempts > 0 ? row : null;
+      });
+      expect(pending.published_at).toBeNull();
+      expect(await positionEvents(processor, UNPUBLISHED)).toEqual([]);
+    } finally {
+      await manager.streams.update('AIS_POSITION', {
+        max_msgs: original.config.max_msgs,
+        discard: original.config.discard,
+      });
+    }
+
+    const [event] = await waitFor(
+      async () => {
+        const events = await positionEvents(processor, UNPUBLISHED);
+        return events.length > 0 ? events : null;
+      },
+      { timeoutMs: 45_000 },
+    );
+    expect(event).toMatchObject({
+      id: positionEventId(UNPUBLISHED, at(0)),
+      source: 'ais-processor',
+      data: { mmsi: UNPUBLISHED, time: at(0).toISOString(), previous: null },
+    });
+    const metrics = (await processor.app.inject({ url: '/metrics' })).body;
+    expect(metrics).toMatch(
+      /aisits_outbox_relayed_total\{type="ais\.position\.recorded\.v1",outcome="failed"\} [1-9]/,
+    );
+  });
+
+  it('revalidates a cached state another replica superseded and resolves stale decisions against the stored latest position', async () => {
+    // A second replica's pipeline: its own in-memory state, the same Valkey and database.
+    const replica = new PositionPipelineService(
+      processor.app.get(LastPositionStore),
+      processor.app.get(PositionWriter),
+      processor.app.get(CoastlineService),
+      processor.app.get(PipelineMetrics),
+      processor.app.get<unknown, ProcessorConfig>(APP_CONFIG),
+    );
+    const base = { lat: -7.3, lon: 112.8 };
+    const message = (offsetS: number, northM: number) =>
+      normalizedMessage({
+        mmsi: SHARED,
+        ...moved(base, northM, 0),
+        sog: 7,
+        cog: 0,
+        hdg: 1,
+        timestamp: at(offsetS),
+      });
+    const raw = (offsetS: number, northM: number) => ({
+      source: 'pusher' as const,
+      receivedAt: new Date().toISOString(),
+      positionTime: at(offsetS).toISOString(),
+      mmsi: SHARED,
+      navstatus: 0,
+      ...moved(base, northM, 0),
+      sog: 7,
+      cog: 0,
+      hdg: 1,
+      aisType: null,
+      receiverPort: null,
+    });
+    const redis = processor.app.get<unknown, Redis>(REDIS_CLIENT);
+    const valkeyTime = async () => redis.hget(`ais:last:${SHARED}`, 'time');
+
+    // This instance records t=0 (cached in memory), the replica t=30.
+    await ingest([message(0, 0)]);
+    await drained(processor);
+    expect(await replica.process(raw(30, 100))).toBe('recorded');
+    // t=20 is older than the replica's position: out of order, no event.
+    await ingest([message(20, 50)]);
+    await drained(processor);
+    await ingest([message(60, 200)]);
+    await drained(processor);
+
+    // The replica records t=90 and Valkey loses it: only the write can tell.
+    expect(await replica.process(raw(90, 300))).toBe('recorded');
+    await redis.del(`ais:last:${SHARED}`);
+    await ingest([message(80, 250)]);
+    await drained(processor);
+    expect(await valkeyTime()).toBe(at(90).toISOString());
+    await ingest([message(120, 400)]);
+    await drained(processor);
+
+    const events = await waitFor(async () => {
+      const found = await positionEvents(processor, SHARED);
+      return found.length === 5 ? found : null;
+    });
+    expect(
+      events.map((event) => [
+        event.data.time,
+        event.data.previous?.time ?? null,
+      ]),
+    ).toEqual([
+      [at(0).toISOString(), null],
+      [at(30).toISOString(), at(0).toISOString()],
+      [at(60).toISOString(), at(30).toISOString()],
+      [at(90).toISOString(), at(60).toISOString()],
+      [at(120).toISOString(), at(90).toISOString()],
+    ]);
+    // Every report is stored for the track; latest and Valkey never moved back.
+    expect(
+      (await positionsOf(processor, SHARED)).map((row) =>
+        row.time.toISOString(),
+      ),
+    ).toEqual([0, 20, 30, 60, 80, 90, 120].map((s) => at(s).toISOString()));
+    expect((await latestOf(processor, SHARED))?.time).toEqual(at(120));
+    // A late save of an older position does not move Valkey back (monotonic).
+    await processor.app.get(LastPositionStore).save({
+      mmsi: SHARED,
+      time: at(0),
+      source: 'pusher',
+      ...base,
+      sog: 7,
+      cog: 0,
+      hdg: 1,
+      navstatus: 0,
+      predictedNavstatus: 0,
+      coastDistanceM: null,
+    });
+    expect(await valkeyTime()).toBe(at(120).toISOString());
+
+    const metrics = (await processor.app.inject({ url: '/metrics' })).body;
+    expect(metrics).toMatch(
+      /aisits_ais_state_revalidations_total\{result="stale"\} [1-9]/,
+    );
+    expect(metrics).toMatch(/aisits_ais_state_stale_decisions_total [1-9]/);
+  });
+
+  it('is idempotent: a fresh consumer replaying AIS_RAW changes neither rows, latest state nor events (each event committed with its rows)', async () => {
     const before = {
       moving: await positionsOf(processor, MOVING),
       anchored: await positionsOf(processor, ANCHORED),
@@ -374,6 +584,11 @@ describe('processor: AIS_RAW → positions, vessel_latest, Valkey, AIS_POSITION'
     expect(await positionsOf(processor, ANCHORED)).toEqual(before.anchored);
     expect((await latestOf(processor, MOVING))?.time).toEqual(at(30));
     expect(await positionEvents(processor, MOVING)).toHaveLength(before.events);
+    const outbox = await processor.pool.query<{ count: string }>(
+      `SELECT count(*) FROM outbox WHERE entity_key = $1 AND published_at IS NOT NULL`,
+      [String(MOVING)],
+    );
+    expect(Number(outbox.rows[0]?.count)).toBe(before.events);
     const metrics = (await processor.app.inject({ url: '/metrics' })).body;
     expect(
       metric(

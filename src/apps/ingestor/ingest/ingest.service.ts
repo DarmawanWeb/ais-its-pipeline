@@ -228,9 +228,19 @@ export class IngestService {
     const reports: AisRawReceivedV1[] = [];
     const errors: IngestError[] = [];
     messages.forEach((message, index) => {
-      const result = normalizeAisMessage(message, { source, receivedAt });
+      const result = normalizeAisMessage(message, {
+        source,
+        receivedAt,
+        utcMode: this.config.AIS_UTC_MODE,
+        maxPositionAgeMs: this.config.INGEST_MAX_POSITION_AGE_S * 1000,
+      });
       if (result.ok) {
         reports.push(result.report);
+        if (result.utcSecondLagS !== null)
+          this.metrics.instruments.utcSecondLag.observe(
+            { source },
+            result.utcSecondLagS,
+          );
         return;
       }
       errors.push({ index, ...result.rejection });

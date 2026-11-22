@@ -1,5 +1,10 @@
-/** Writes one batch atomically (rejects when nothing was written). */
-export type BatchSink<Row> = (rows: readonly Row[]) => Promise<void>;
+/**
+ * Writes one batch atomically and resolves with one result per row, in row
+ * order (rejects when nothing was written).
+ */
+export type BatchSink<Row, Result> = (
+  rows: readonly Row[],
+) => Promise<readonly Result[]>;
 
 /** Batching policy of a {@link BatchWriter}. */
 export interface BatchWriterOptions {
@@ -11,23 +16,24 @@ export interface BatchWriterOptions {
   readonly maxConcurrent?: number | undefined;
 }
 
-interface Pending<Row> {
+interface Pending<Row, Result> {
   readonly row: Row;
-  readonly resolve: () => void;
+  readonly resolve: (result: Result) => void;
   readonly reject: (error: unknown) => void;
 }
 
 /**
- * Group commit for row writes: `write()` resolves once the batch holding
- * the row is committed (callers acknowledge their messages only then). A
+ * Group commit for row writes: `write()` resolves with the row's result once
+ * the batch holding it is committed (callers acknowledge their messages only
+ * then). A
  * batch starts as soon as the writer is idle — rows written in the same
  * event-loop turn share it — immediately when `maxRows` rows are waiting,
  * and at the latest `maxDelayMs` after a row was buffered. While batches
  * are in flight new rows accumulate, so batches grow with the load (up to
  * `maxRows`) and the latency stays one transaction at low load.
  */
-export class BatchWriter<Row> {
-  private buffer: Pending<Row>[] = [];
+export class BatchWriter<Row, Result> {
+  private buffer: Pending<Row, Result>[] = [];
   private inFlight = 0;
   private timer: NodeJS.Timeout | null = null;
   private immediate: NodeJS.Immediate | null = null;
@@ -35,7 +41,7 @@ export class BatchWriter<Row> {
   private readonly maxConcurrent: number;
 
   constructor(
-    private readonly sink: BatchSink<Row>,
+    private readonly sink: BatchSink<Row, Result>,
     private readonly options: BatchWriterOptions,
   ) {
     this.maxConcurrent = Math.max(1, options.maxConcurrent ?? 2);
@@ -46,9 +52,9 @@ export class BatchWriter<Row> {
     return this.buffer.length;
   }
 
-  /** Buffers `row`; resolves when its batch is committed, rejects when the batch failed. */
-  write(row: Row): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+  /** Buffers `row`; resolves with its result when its batch is committed, rejects when the batch failed. */
+  write(row: Row): Promise<Result> {
+    return new Promise<Result>((resolve, reject) => {
       this.buffer.push({ row, resolve, reject });
       if (this.buffer.length >= this.options.maxRows) {
         this.start();
@@ -88,7 +94,7 @@ export class BatchWriter<Row> {
     const batch = this.buffer.slice(0, this.options.maxRows);
     this.buffer = this.buffer.slice(batch.length);
     this.inFlight += 1;
-    let write: Promise<void>;
+    let write: Promise<readonly Result[]>;
     try {
       write = this.sink(batch.map((pending) => pending.row));
     } catch (error) {
@@ -98,8 +104,15 @@ export class BatchWriter<Row> {
     }
     write
       .then(
-        () => {
-          for (const pending of batch) pending.resolve();
+        (results) => {
+          if (results.length !== batch.length) {
+            const error = new Error(
+              `The batch sink returned ${results.length} results for ${batch.length} rows`,
+            );
+            for (const pending of batch) pending.reject(error);
+            return;
+          }
+          results.forEach((result, i) => batch[i]?.resolve(result));
         },
         (error: unknown) => {
           for (const pending of batch) pending.reject(error);

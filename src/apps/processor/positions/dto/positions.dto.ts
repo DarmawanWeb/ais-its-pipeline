@@ -169,9 +169,18 @@ export class TrackDto {
 
   @ApiProperty({
     description:
-      'More than 100 000 points matched: narrow the range or use resolution 1m',
+      'More than 100 000 points matched: the newest 100 000 are returned (the track still ends at `to`); fetch the older rest with `to` = `remainingTo`, or use resolution 1m',
   })
   readonly truncated: boolean;
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      'When truncated: the `to` of the request for the older rest of the range (1 ms before the first returned point); null when the track is complete',
+  })
+  readonly remainingTo: string | null;
 
   @ApiProperty({ type: [TrackPointDto] })
   readonly points: TrackPointDto[];
@@ -183,6 +192,7 @@ export class TrackDto {
     this.resolution = track.resolution;
     this.simplifyM = track.simplifyM;
     this.truncated = track.truncated;
+    this.remainingTo = track.remainingTo?.toISOString() ?? null;
     this.points = track.points.map((point) => new TrackPointDto(point));
   }
 }

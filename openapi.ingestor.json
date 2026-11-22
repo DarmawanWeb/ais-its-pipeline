@@ -363,7 +363,8 @@
               "POSITION_NOT_AVAILABLE",
               "OUT_OF_RANGE",
               "INVALID_TIMESTAMP",
-              "FUTURE_TIMESTAMP"
+              "FUTURE_TIMESTAMP",
+              "STALE_TIMESTAMP"
             ],
             "example": "POSITION_NOT_AVAILABLE"
           },

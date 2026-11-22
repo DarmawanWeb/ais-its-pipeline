@@ -4,6 +4,14 @@ import { createHash } from 'node:crypto';
 const MAX_UUID_V7_MS = 2 ** 48 - 1;
 
 /**
+ * Whether a UUID v7 can carry `timeMs` (whole milliseconds from 1970-01-01
+ * to the year 10889): the range of the deterministic event ids.
+ */
+export function isUuidV7Time(timeMs: number): boolean {
+  return Number.isInteger(timeMs) && timeMs >= 0 && timeMs <= MAX_UUID_V7_MS;
+}
+
+/**
  * Deterministic UUID v7 for a fact identified by `key` at `timeMs`: the
  * 48-bit millisecond timestamp of RFC 9562 §5.7 followed by version, variant
  * and 74 bits of SHA-256(`key`). Re-processing the same fact yields the same
@@ -13,7 +21,7 @@ const MAX_UUID_V7_MS = 2 ** 48 - 1;
  * @throws {RangeError} when `timeMs` is outside the UUID v7 range
  */
 export function deterministicUuidV7(timeMs: number, key: string): string {
-  if (!Number.isInteger(timeMs) || timeMs < 0 || timeMs > MAX_UUID_V7_MS) {
+  if (!isUuidV7Time(timeMs)) {
     throw new RangeError(`Timestamp out of the UUID v7 range: ${timeMs}`);
   }
   const bytes = createHash('sha256').update(key).digest().subarray(0, 16);

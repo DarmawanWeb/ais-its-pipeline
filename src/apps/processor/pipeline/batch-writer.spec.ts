@@ -2,14 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { BatchWriter } from './batch-writer.js';
 
-/** A sink whose batches complete when the test says so. */
+/** A sink whose batches complete when the test says so (result of a row = row × 10). */
 function controllableSink() {
   const batches: number[][] = [];
   const pending: { resolve: () => void; reject: (error: Error) => void }[] = [];
-  const sink = (rows: readonly number[]): Promise<void> => {
+  const sink = (rows: readonly number[]): Promise<readonly number[]> => {
     batches.push([...rows]);
-    return new Promise<void>((resolve, reject) =>
-      pending.push({ resolve, reject }),
+    return new Promise<readonly number[]>((resolve, reject) =>
+      pending.push({
+        resolve: () => {
+          resolve(rows.map((row) => row * 10));
+        },
+        reject,
+      }),
     );
   };
   return { sink, batches, pending };
@@ -34,7 +39,20 @@ describe('BatchWriter', () => {
 
     expect(batches).toEqual([[1, 2, 3]]);
     pending[0]?.resolve();
-    await expect(Promise.all(writes)).resolves.toBeDefined();
+    // Each write resolves with its own row's result.
+    await expect(Promise.all(writes)).resolves.toEqual([10, 20, 30]);
+  });
+
+  it('rejects every row of a batch whose sink returned a result count that does not match', async () => {
+    const writer = new BatchWriter<number, number>(() => Promise.resolve([1]), {
+      maxRows: 500,
+      maxDelayMs: 1000,
+    });
+    const writes = [writer.write(1), writer.write(2)].map((write) =>
+      expect(write).rejects.toThrow('returned 1 results for 2 rows'),
+    );
+    await flushImmediates();
+    await Promise.all(writes);
   });
 
   it('groups rows written while a batch is in flight (group commit)', async () => {

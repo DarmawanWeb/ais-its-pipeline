@@ -2,7 +2,7 @@ import { LRUCache } from 'lru-cache';
 
 import type { RecordedPosition } from './recorded-position.js';
 
-/** Raised for work queued behind a failed load or commit of the same vessel. */
+/** Raised for decisions queued behind a failed load or write of the same vessel. */
 export class VesselStateResetError extends Error {
   override readonly name = 'VesselStateResetError';
 
@@ -16,22 +16,33 @@ export class VesselStateResetError extends Error {
 /** In-flight state of one vessel. */
 export interface VesselEntry {
   readonly mmsi: number;
-  /** Latest position: committed, or decided and still being committed. */
+  /** Latest position: committed, or decided and still being written. */
   state: RecordedPosition | null;
-  /** Commit of {@link state} while it is pending, else `null`. */
+  /** Write of {@link state} while it is pending, else `null`. */
   latestCommit: Promise<void> | null;
   /** @internal FIFO of decisions; starts with the state load. */
   queue: Promise<void>;
-  /** @internal Tail of the commit chain (publish order). */
+  /** @internal Settles when every write tracked so far settled (never rejects). */
   commits: Promise<void>;
   /** @internal Handlers holding the entry. */
   users: number;
-  /** @internal A load or commit failed: the entry is detached. */
+  /** @internal A load or write failed: queued decisions are retried. */
   failed: boolean;
 }
 
-/** Loads the last committed position of a vessel (Valkey, then the database). */
-export type StateLoader = (mmsi: number) => Promise<RecordedPosition | null>;
+/** Where the tracker gets the last committed position of a vessel. */
+export interface VesselStateSource {
+  /** The last committed position (Valkey, then the database), `null` for a vessel never seen. */
+  load(mmsi: number): Promise<RecordedPosition | null>;
+  /** Whether a position cached in memory is still the vessel's last one (no newer one was stored). */
+  isCurrent(cached: RecordedPosition): Promise<boolean>;
+}
+
+const settle = (promise: Promise<unknown>): Promise<void> =>
+  promise.then(
+    () => undefined,
+    () => undefined,
+  );
 
 /**
  * Per-vessel state of the processor: the last position in an in-memory LRU
@@ -40,18 +51,23 @@ export type StateLoader = (mmsi: number) => Promise<RecordedPosition | null>;
  *
  * - decisions run one at a time per vessel, in arrival order, after the
  *   vessel's state was loaded ({@link decide});
- * - commits (publish + store) run in decision order ({@link chainCommit});
- *   when one fails, every later commit of the vessel fails too and the entry
- *   is discarded, so retried reports start again from the last committed
- *   state instead of chaining onto a position that was never published;
+ * - a cached state is revalidated against the store before it is used
+ *   ({@link VesselStateSource.isCurrent}): another replica may have
+ *   recorded the vessel since (failover, failback);
+ * - an entry is detached when one of its writes failed ({@link fail}) or
+ *   turned out to be based on a stale state ({@link invalidate}); the next
+ *   report of the vessel waits until the detached entry's decisions and
+ *   writes settled, then reloads the state;
  * - entries with work in flight are pinned (never evicted).
  */
 export class VesselTracker {
   private readonly active = new Map<number, VesselEntry>();
   private readonly idle: LRUCache<number, RecordedPosition>;
+  /** Detached entries whose work is still settling, per vessel. */
+  private readonly detached = new Map<number, Promise<void>>();
 
   constructor(
-    private readonly load: StateLoader,
+    private readonly source: VesselStateSource,
     maxCachedVessels: number,
   ) {
     this.idle = new LRUCache({ max: maxCachedVessels });
@@ -62,32 +78,35 @@ export class VesselTracker {
     return this.active.size + this.idle.size;
   }
 
-  /** Takes a vessel's entry for one report; pair with {@link release}. */
+  /**
+   * Takes a vessel's entry for one report; pair with {@link release}, and
+   * call {@link decide} right away (synchronously) for the report.
+   */
   acquire(mmsi: number): VesselEntry {
     let entry = this.active.get(mmsi);
     if (entry === undefined) {
       const cached = this.idle.get(mmsi);
+      this.idle.delete(mmsi);
+      const settling = this.detached.get(mmsi);
       const created: VesselEntry = {
         mmsi,
-        state: cached ?? null,
+        state: null,
         latestCommit: null,
         queue: Promise.resolve(),
         commits: Promise.resolve(),
         users: 0,
         failed: false,
       };
-      if (cached === undefined) {
-        created.queue = this.load(mmsi).then(
-          (state) => {
-            created.state = state;
-          },
-          (error: unknown) => {
-            this.fail(created);
-            throw error;
-          },
-        );
-      }
-      this.idle.delete(mmsi);
+      created.queue = (async () => {
+        if (settling !== undefined) await settling;
+        created.state =
+          cached !== undefined && (await this.source.isCurrent(cached))
+            ? cached
+            : await this.source.load(mmsi);
+      })().catch((error: unknown) => {
+        this.fail(created);
+        throw error;
+      });
       this.active.set(mmsi, created);
       entry = created;
     }
@@ -122,42 +141,43 @@ export class VesselTracker {
       if (entry.failed) throw new VesselStateResetError(entry.mmsi);
       return decision(entry);
     });
-    entry.queue = run.then(
-      () => undefined,
-      () => undefined,
-    );
+    entry.queue = settle(run);
     return run;
   }
 
-  /**
-   * Chains the commit of a decided position: waits for `written` (its rows)
-   * and for the vessel's previous commit, then runs `commit` (publish +
-   * store). Call it from the decision, synchronously, so commits keep the
-   * decision order. A failure discards the entry.
-   */
-  chainCommit(
-    entry: VesselEntry,
-    written: Promise<void>,
-    commit: () => Promise<void>,
-  ): Promise<void> {
-    const previous = entry.commits;
-    const chained = (async () => {
-      await written;
-      await previous;
-      if (entry.failed) throw new VesselStateResetError(entry.mmsi);
-      await commit();
-    })();
-    chained.catch(() => {
-      this.fail(entry);
-    });
-    entry.commits = chained;
-    return chained;
+  /** Tracks a pending write of the entry (detached entries are reloaded only after it settled). */
+  track(entry: VesselEntry, write: Promise<unknown>): void {
+    entry.commits = Promise.all([entry.commits, settle(write)]).then(
+      () => undefined,
+    );
   }
 
-  /** Detaches a failed entry: queued work fails, the next report reloads the state. */
-  private fail(entry: VesselEntry): void {
+  /** Detaches an entry after a failed write: queued decisions are retried, the next report reloads the state. */
+  fail(entry: VesselEntry): void {
     entry.failed = true;
-    if (this.active.get(entry.mmsi) === entry) this.active.delete(entry.mmsi);
-    this.idle.delete(entry.mmsi);
+    this.detach(entry);
+  }
+
+  /**
+   * Detaches an entry whose state turned out to be stale: queued decisions
+   * still run (their writes are resolved against the stored state), the
+   * next report reloads the state once they settled.
+   */
+  invalidate(entry: VesselEntry): void {
+    this.detach(entry);
+  }
+
+  private detach(entry: VesselEntry): void {
+    const { mmsi } = entry;
+    this.idle.delete(mmsi);
+    if (this.active.get(mmsi) !== entry) return;
+    this.active.delete(mmsi);
+    // Every decision of the entry is queued already (decide() follows
+    // acquire() synchronously); wait for them, then for their writes.
+    const settling = settle(entry.queue).then(() => entry.commits);
+    this.detached.set(mmsi, settling);
+    void settling.then(() => {
+      if (this.detached.get(mmsi) === settling) this.detached.delete(mmsi);
+    });
   }
 }

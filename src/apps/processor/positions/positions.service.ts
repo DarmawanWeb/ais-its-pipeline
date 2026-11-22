@@ -25,7 +25,10 @@ export const TRACK_MAX_RANGE_MS: Readonly<Record<TrackResolution, number>> = {
   raw: 7 * DAY_MS,
   '1m': 90 * DAY_MS,
 };
-/** Most points of one track before simplification (`truncated` beyond). */
+/**
+ * Most points of one track before simplification; beyond, the newest are
+ * returned (`truncated`, `remainingTo`).
+ */
 export const TRACK_MAX_POINTS = 100_000;
 
 /** A resolved track request. */
@@ -38,25 +41,41 @@ export interface TrackRequest {
   readonly simplifyM?: number | undefined;
 }
 
+/** Latest positions of a `GET /ais/latest` request. */
+export interface LatestPositions {
+  /** Newest first, at most the requested `limit`. */
+  readonly vessels: readonly VesselLatest[];
+  /** More vessels matched than `limit` (the least recently seen were left out). */
+  readonly truncated: boolean;
+}
+
 /** Use cases of the AIS query API (positions are shared across tenants, spec §8.5). */
 @Injectable()
 export class PositionsService {
   constructor(private readonly repository: PositionsRepository) {}
 
-  /** Latest position of every vessel seen since `since` (default 24 h), inside `bbox`. */
-  latest(
+  /**
+   * Latest position of every vessel seen since `since` (default 24 h),
+   * inside `bbox`, newest first; one row more than `limit` is read to tell
+   * whether the result is complete.
+   */
+  async latest(
     query: {
       readonly bbox: BBox | undefined;
       readonly since: Date | undefined;
       readonly limit: number;
     },
     now: Date = new Date(),
-  ): Promise<VesselLatest[]> {
-    return this.repository.latest({
+  ): Promise<LatestPositions> {
+    const rows = await this.repository.latest({
       bbox: query.bbox,
       since: query.since ?? new Date(now.getTime() - LATEST_DEFAULT_WINDOW_MS),
-      limit: query.limit,
+      limit: query.limit + 1,
     });
+    return {
+      vessels: rows.length > query.limit ? rows.slice(0, query.limit) : rows,
+      truncated: rows.length > query.limit,
+    };
   }
 
   /** @throws {AisPositionNotFoundError} `404` when the vessel was never recorded */
@@ -66,7 +85,12 @@ export class PositionsService {
     return latest;
   }
 
-  /** A vessel's track (`raw` positions or `1m` buckets), optionally simplified. */
+  /**
+   * A vessel's track (`raw` positions or `1m` buckets), optionally
+   * simplified. Beyond {@link TRACK_MAX_POINTS} the newest points are kept
+   * (`truncated`); `remainingTo` is then the `to` of the request for the
+   * older rest of the range.
+   */
   async track(request: TrackRequest): Promise<Track> {
     const range = {
       mmsi: request.mmsi,
@@ -82,10 +106,16 @@ export class PositionsService {
       request.resolution === 'raw'
         ? await this.repository.rawTrack(range)
         : await this.repository.minuteTrack(range);
+    // The newest points, in time order: the oldest one is the surplus.
     const truncated = points.length > TRACK_MAX_POINTS;
     const kept: readonly TrackPoint[] = truncated
-      ? points.slice(0, TRACK_MAX_POINTS)
+      ? points.slice(points.length - TRACK_MAX_POINTS)
       : points;
+    const first = kept[0];
+    const remainingTo =
+      truncated && first !== undefined
+        ? new Date(first.time.getTime() - 1)
+        : null;
     const simplifyM =
       request.simplifyM !== undefined && request.simplifyM > 0
         ? request.simplifyM
@@ -97,6 +127,7 @@ export class PositionsService {
       resolution: request.resolution,
       simplifyM,
       truncated,
+      remainingTo,
       points: simplifyM === null ? kept : simplifyTrack(kept, simplifyM),
     };
   }

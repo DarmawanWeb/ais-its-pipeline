@@ -228,6 +228,61 @@ describe('ingestor: POST /api/v2/ingest/ais and GET /api/v2/ingest/status', () =
     );
   });
 
+  it('lists implausible position times per message instead of failing the batch (before 1970, negative years, epoch seconds)', async () => {
+    const now = Date.now();
+    const valid = normalizedMessage({
+      mmsi: 525005148,
+      lat: -7.15,
+      lon: 112.9,
+      timestamp: new Date(now - 5000),
+    });
+    const at = (mmsi: number, timestamp: string | number) => ({
+      ...valid,
+      mmsi,
+      timestamp,
+    });
+    // The reviewer's batch: it used to answer 503 "retry" (unpublishable
+    // report) after storing the plausible ones, and could never succeed.
+    const response = await ingestor.app.inject({
+      method: 'POST',
+      url: INGEST_URL,
+      headers: { 'x-api-key': ingestKey },
+      payload: [
+        at(525000001, '0001-01-01T00:00:00Z'),
+        at(525000002, '1960-06-01T00:00:00Z'),
+        at(525000003, '-000001-01-01T00:00:00Z'),
+        at(525000004, 1700000000),
+        valid,
+      ],
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(
+      response.json<{
+        accepted: number;
+        rejected: number;
+        errors: { index: number; code: string; field: string | null }[];
+      }>(),
+    ).toEqual({
+      accepted: 1,
+      rejected: 4,
+      errors: [
+        expect.objectContaining({ index: 0, code: 'INVALID_TIMESTAMP' }),
+        expect.objectContaining({ index: 1, code: 'INVALID_TIMESTAMP' }),
+        expect.objectContaining({ index: 2, code: 'INVALID_TIMESTAMP' }),
+        expect.objectContaining({
+          index: 3,
+          code: 'STALE_TIMESTAMP',
+          field: 'timestamp',
+        }),
+      ],
+    });
+    const stored = (await pushedReports(ingestor, startedAt)).filter(
+      ({ data }) => data.mmsi >= 525000001 && data.mmsi <= 525000004,
+    );
+    expect(stored).toEqual([]);
+  });
+
   it('is idempotent: a re-sent batch is accepted and stored once', async () => {
     const message = normalizedMessage({
       mmsi: 525005143,

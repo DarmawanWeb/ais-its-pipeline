@@ -64,6 +64,17 @@ function instruments(metrics: MetricsService) {
       name: 'ais_pusher_connections',
       help: 'Open socket.io pusher connections',
     }),
+    utcSecondLag: metrics.histogram({
+      name: 'ais_utc_second_lag_seconds',
+      help: 'Diagnostic of the upstream utc meaning: (second of the message timestamp - utc) mod 60 for utc 0-59; gathers near 0 when utc is the ITU-R M.1371 time stamp, spreads over 0-59 otherwise',
+      labelNames: ['source'],
+      buckets: [0, 1, 2, 3, 5, 10, 20, 30, 45, 59],
+    }),
+    pusherAuthUnavailable: metrics.counter({
+      name: 'ais_pusher_auth_unavailable_total',
+      help: "Pusher events whose API key could not be re-checked (introspection unavailable), by result: accepted with the connection's last verified key (grace) or refused as retryable",
+      labelNames: ['result'],
+    }),
   };
 }
 

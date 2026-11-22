@@ -3,6 +3,7 @@
   "paths": {
     "/api/v2/ais/latest": {
       "get": {
+        "description": "Newest first. When more vessels match than `limit`, the least recently seen are left out and the response carries `X-Truncated: true`: raise `limit` (≤ 50 000), narrow `bbox` or `since`.",
         "operationId": "PositionsController_latest",
         "parameters": [
           {
@@ -39,6 +40,18 @@
         ],
         "responses": {
           "200": {
+            "headers": {
+              "X-Truncated": {
+                "description": "`true` when more vessels matched than `limit` (the least recently seen were left out), else `false`",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true",
+                    "false"
+                  ]
+                }
+              }
+            },
             "description": "",
             "content": {
               "application/json": {
@@ -654,7 +667,13 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "More than 100 000 points matched: narrow the range or use resolution 1m"
+            "description": "More than 100 000 points matched: the newest 100 000 are returned (the track still ends at `to`); fetch the older rest with `to` = `remainingTo`, or use resolution 1m"
+          },
+          "remainingTo": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When truncated: the `to` of the request for the older rest of the range (1 ms before the first returned point); null when the track is complete"
           },
           "points": {
             "type": "array",
@@ -670,6 +689,7 @@
           "resolution",
           "simplifyM",
           "truncated",
+          "remainingTo",
           "points"
         ]
       },

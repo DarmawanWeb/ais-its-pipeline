@@ -3,13 +3,14 @@ import {
   RequirePermissions,
 } from '@darmawanweb/ais-its-nest/auth';
 import { bboxOf, resolveQueryTimeRange } from '@darmawanweb/ais-its-nest/http';
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import { Controller, Get, Param, Query, Res } from '@nestjs/common';
 import {
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
+import type { FastifyReply } from 'fastify';
 
 import {
   MmsiParamDto,
@@ -28,6 +29,25 @@ import {
   TRACK_MAX_RANGE_MS,
 } from './positions.service.js';
 
+/** Response header of `GET /ais/latest`: `true` when more vessels matched than `limit`. */
+export const TRUNCATED_HEADER = 'X-Truncated';
+
+/**
+ * WORKAROUND for @darmawanweb/ais-its-nest 0.2.0 (reported as a platform
+ * issue): the kit's CORS setup exposes a fixed header list and offers no way
+ * to add one, so a cross-origin browser client could not read
+ * {@link TRUNCATED_HEADER}. Appends it to the list the CORS plugin set for
+ * this response (a same-origin or non-CORS response has none). Remove once
+ * the kit lets services extend the exposed headers.
+ */
+function exposeHeader(reply: FastifyReply, name: string): void {
+  const exposed = reply.getHeader('access-control-expose-headers');
+  if (typeof exposed !== 'string' || exposed === '') return;
+  const names = exposed.split(',').map((value) => value.trim().toLowerCase());
+  if (!names.includes(name.toLowerCase()))
+    reply.header('access-control-expose-headers', `${exposed}, ${name}`);
+}
+
 /**
  * AIS query API (spec §13.2): `ais:read` for users, API keys with the
  * `ais:read` scope. AIS data is shared across tenants (spec §8.5).
@@ -42,15 +62,31 @@ export class PositionsController {
   @Get('latest')
   @ApiOperation({
     summary: 'Latest position of every vessel (map initial state)',
+    description:
+      'Newest first. When more vessels match than `limit`, the least recently seen are left out and the response carries `X-Truncated: true`: raise `limit` (≤ 50 000), narrow `bbox` or `since`.',
   })
-  @ApiOkResponse({ type: [VesselLatestDto] })
-  async latest(@Query() query: LatestQueryDto): Promise<VesselLatestDto[]> {
+  @ApiOkResponse({
+    type: [VesselLatestDto],
+    headers: {
+      [TRUNCATED_HEADER]: {
+        description:
+          '`true` when more vessels matched than `limit` (the least recently seen were left out), else `false`',
+        schema: { type: 'string', enum: ['true', 'false'] },
+      },
+    },
+  })
+  async latest(
+    @Query() query: LatestQueryDto,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ): Promise<VesselLatestDto[]> {
     const latest = await this.positions.latest({
       bbox: bboxOf(query),
       since: query.since === undefined ? undefined : new Date(query.since),
       limit: query.limit,
     });
-    return latest.map((position) => new VesselLatestDto(position));
+    reply.header(TRUNCATED_HEADER, String(latest.truncated));
+    exposeHeader(reply, TRUNCATED_HEADER);
+    return latest.vessels.map((position) => new VesselLatestDto(position));
   }
 
   @Get('vessels/:mmsi/latest')

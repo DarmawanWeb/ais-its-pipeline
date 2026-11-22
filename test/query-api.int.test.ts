@@ -1,6 +1,7 @@
 import { waitFor } from '@darmawanweb/ais-its-nest/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { PositionsRepository } from '../src/apps/processor/positions/positions.repository.js';
 import { moved, normalizedMessage } from './support/messages.js';
 import {
   purgeStreams,
@@ -22,6 +23,7 @@ interface TrackBody {
   resolution: string;
   simplifyM: number | null;
   truncated: boolean;
+  remainingTo: string | null;
   points: { time: string; lat: number; lon: number; samples?: number }[];
 }
 
@@ -41,7 +43,10 @@ describe('processor: AIS query API', () => {
 
   beforeAll(async () => {
     auth = await startTestAuth();
-    ingestor = await startIngestor(auth);
+    // The fixture backfills a vessel last seen two days ago (default maximum age 24 h).
+    ingestor = await startIngestor(auth, {
+      INGEST_MAX_POSITION_AGE_S: String(3 * 86_400),
+    });
     await purgeStreams(ingestor.app, ['AIS_RAW', 'AIS_POSITION']);
     processor = await startProcessor(auth, await resetProcessorSchema());
     viewer = await auth.bearer({ roles: ['viewer'] });
@@ -156,10 +161,23 @@ describe('processor: AIS query API', () => {
     ).json<{ mmsi: number }[]>();
     expect(inBatam.map((vessel) => vessel.mmsi)).toEqual([BATAM]);
 
-    const newest = (await get('/api/v2/ais/latest?limit=1')).json<
-      { mmsi: number }[]
-    >();
-    expect(newest.map((vessel) => vessel.mmsi)).toEqual([BATAM]);
+    const newest = await get('/api/v2/ais/latest?limit=1');
+    expect(newest.json<{ mmsi: number }[]>().map((v) => v.mmsi)).toEqual([
+      BATAM,
+    ]);
+    // Truncation is signalled (the least recently seen vessel was left out).
+    expect(newest.headers['x-truncated']).toBe('true');
+    expect(
+      (await get('/api/v2/ais/latest?limit=2')).headers['x-truncated'],
+    ).toBe('false');
+    // Readable by cross-origin browser clients (CORS_ORIGINS).
+    const cors = await get('/api/v2/ais/latest?limit=1', {
+      ...viewer,
+      origin: 'http://localhost:5173',
+    });
+    expect(
+      String(cors.headers['access-control-expose-headers']).split(/,\s*/),
+    ).toContain('X-Truncated');
 
     for (const query of [
       'bbox=1,2,3',
@@ -206,6 +224,7 @@ describe('processor: AIS query API', () => {
       resolution: 'raw',
       simplifyM: null,
       truncated: false,
+      remainingTo: null,
     });
     expect(track.points.map((point) => point.time)).toEqual(
       Array.from({ length: 41 }, (_, i) => trackTime(i)),
@@ -241,6 +260,30 @@ describe('processor: AIS query API', () => {
       expect(new Date(point.time).getUTCSeconds()).toBe(0);
     const times = minutes.points.map((point) => point.time);
     expect([...times].sort()).toEqual(times);
+  });
+
+  it('reads the NEWEST points of a range when a track is limited, in time order (a truncated track keeps its end)', async () => {
+    const repository = processor.app.get(PositionsRepository);
+    const range = {
+      mmsi: TRACKED,
+      from: new Date(trackTime(0)),
+      to: new Date(trackTime(40)),
+    };
+    const raw = await repository.rawTrack({ ...range, limit: 3 });
+    expect(raw.map((point) => point.time.toISOString())).toEqual(
+      [38, 39, 40].map((i) => trackTime(i)),
+    );
+    const minutes = await repository.minuteTrack({
+      ...range,
+      from: new Date(Math.floor(Date.parse(trackTime(0)) / 60_000) * 60_000),
+      limit: 2,
+    });
+    expect(minutes).toHaveLength(2);
+    const [older, newest] = minutes.map((point) => point.time.getTime());
+    expect(newest).toBe(
+      Math.floor(Date.parse(trackTime(40)) / 60_000) * 60_000,
+    );
+    expect(older).toBe((newest ?? 0) - 60_000);
   });
 
   it('limits track ranges: raw ≤ 7 days, 1m ≤ 90 days', async () => {
