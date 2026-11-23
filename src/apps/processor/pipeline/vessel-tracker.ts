@@ -51,9 +51,13 @@ const settle = (promise: Promise<unknown>): Promise<void> =>
  *
  * - decisions run one at a time per vessel, in arrival order, after the
  *   vessel's state was loaded ({@link decide});
- * - a cached state is revalidated against the store before it is used
- *   ({@link VesselStateSource.isCurrent}): another replica may have
- *   recorded the vessel since (failover, failback);
+ * - every state is dropped when this instance becomes the active processor
+ *   ({@link reset}): another replica may have recorded the vessels while
+ *   it stood by (failover, failback);
+ * - a cached state is also revalidated against the store before it is used
+ *   ({@link VesselStateSource.isCurrent}), a defence for writes outside a
+ *   pin change (the previous instance's batches still committing right
+ *   after a takeover);
  * - an entry is detached when one of its writes failed ({@link fail}) or
  *   turned out to be based on a stale state ({@link invalidate}); the next
  *   report of the vessel waits until the detached entry's decisions and
@@ -150,6 +154,20 @@ export class VesselTracker {
     entry.commits = Promise.all([entry.commits, settle(write)]).then(
       () => undefined,
     );
+  }
+
+  /**
+   * Drops every state in memory: cached ones at once, entries with work in
+   * flight are detached (their decisions and writes still run; the next
+   * report of the vessel waits for them, then reloads the state).
+   *
+   * @returns the number of vessel states dropped
+   */
+  reset(): number {
+    const dropped = this.size;
+    for (const entry of [...this.active.values()]) this.detach(entry);
+    this.idle.clear();
+    return dropped;
   }
 
   /** Detaches an entry after a failed write: queued decisions are retried, the next report reloads the state. */

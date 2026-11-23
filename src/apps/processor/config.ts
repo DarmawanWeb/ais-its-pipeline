@@ -41,6 +41,21 @@ export const processorConfigSchema = defineConfig({
   AIS_STATE_CACHE_SIZE: envInteger(100, 10_000_000).default(100_000),
   /** Lifetime of a vessel's `ais:last:<mmsi>` hash after its last update [days]. */
   AIS_STATE_TTL_DAYS: envInteger(1, 3650).default(30),
+  /**
+   * Idle polling interval of the outbox relay [ms]; a committed batch with
+   * recorded positions wakes it at once.
+   */
+  OUTBOX_POLL_INTERVAL_MS: envInteger(10, 60_000).default(200),
+  /** Due outbox rows claimed per relay pass (`FOR UPDATE SKIP LOCKED`). */
+  OUTBOX_BATCH_SIZE: envInteger(1, 10_000).default(500),
+  /** Vessels (entity keys) published at once per pass; one vessel's events stay in order. */
+  OUTBOX_PUBLISH_CONCURRENCY: envInteger(1, 1024).default(64),
+  /** First retry delay of a failed publication [ms]; doubles per attempt (equal jitter). */
+  OUTBOX_RETRY_BASE_MS: envInteger(10, 600_000).default(1000),
+  /** Longest retry delay of a failed publication [ms]. */
+  OUTBOX_RETRY_MAX_MS: envInteger(10, 3_600_000).default(30_000),
+  /** Published outbox rows are deleted after this long [minutes] (the events stay in AIS_POSITION). */
+  OUTBOX_RETENTION_MINUTES: envInteger(1, 7 * 24 * 60).default(10),
 });
 
 /** Validated processor configuration. */

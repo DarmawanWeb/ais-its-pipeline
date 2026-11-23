@@ -16,7 +16,7 @@ export interface TrackVertex {
  * tolerances of metres to kilometres. Iterative (no recursion depth limit);
  * the kept points are returned in their original order, unchanged.
  *
- * @method geo.track_simplification (proposed id — not yet in docs/references/methods.json)
+ * @method geo.track_simplification
  * @param points - track in time order
  * @param toleranceM - perpendicular distance tolerance [m]; ≤ 0 keeps every point
  * @see https://doi.org/10.3138/FM57-6770-U75U-7727 (Douglas & Peucker 1973)

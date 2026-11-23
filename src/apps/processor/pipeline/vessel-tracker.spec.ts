@@ -170,6 +170,44 @@ describe('VesselTracker', () => {
     expect(current?.time.getUTCSeconds()).toBe(3);
   });
 
+  it('reset (activation) drops cached states and detaches busy ones: each vessel reloads after its work in flight settled', async () => {
+    const state = source((mmsi: number) => Promise.resolve(position(mmsi, 0)));
+    const tracker = new VesselTracker(state, 100);
+    const cached = tracker.acquire(525000001);
+    await tracker.decide(cached, () => undefined);
+    tracker.release(cached);
+    const busy = tracker.acquire(525000002);
+    await tracker.decide(busy, () => undefined);
+    const write = deferred<undefined>();
+    tracker.track(busy, write.promise);
+
+    expect(tracker.reset()).toBe(2);
+    expect(tracker.size).toBe(0);
+    // A decision queued on the detached entry still runs on its state.
+    await expect(tracker.decide(busy, (e) => e.state?.mmsi)).resolves.toBe(
+      525000002,
+    );
+    tracker.release(busy);
+
+    const reloaded = tracker.acquire(525000001);
+    await tracker.decide(reloaded, () => undefined);
+    tracker.release(reloaded);
+    const waiting = tracker.acquire(525000002);
+    const decided = tracker.decide(waiting, (e) => e.state?.mmsi);
+    await tick();
+    // The busy vessel reloads only once its pending write settled.
+    expect(state.load).toHaveBeenCalledTimes(3);
+    write.resolve(undefined);
+    await expect(decided).resolves.toBe(525000002);
+    tracker.release(waiting);
+
+    expect(state.load.mock.calls.map(([mmsi]) => mmsi)).toEqual([
+      525000001, 525000002, 525000001, 525000002,
+    ]);
+    // Dropped states are reloaded, never revalidated.
+    expect(state.isCurrent).not.toHaveBeenCalled();
+  });
+
   it('keeps at most the configured number of idle vessels (LRU) and never evicts busy ones', async () => {
     const state = source((mmsi: number) => Promise.resolve(position(mmsi, 0)));
     const tracker = new VesselTracker(state, 2);

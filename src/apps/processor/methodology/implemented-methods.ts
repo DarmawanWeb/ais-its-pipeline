@@ -5,8 +5,10 @@
  * README section "Methodology & references".
  */
 export const IMPLEMENTED_METHOD_IDS: readonly string[] = [
-  // Ingestor and processor: normalization, position time, duplicate filter.
+  // Ingestor and processor: normalization, legacy position time, duplicate filter.
   'data.ais_ingest_rules',
+  // Ingestor: ITU time-stamp reading (AIS_UTC_MODE=itu), plausibility window, utc diagnostic.
+  'data.ais_position_time',
   // Ingestor: navstatus range and "not available" values of the validation.
   'navstatus.ais_codes',
   // Processor: legacy haversine of the duplicate filter (contracts implementation).
@@ -14,6 +16,6 @@ export const IMPLEMENTED_METHOD_IDS: readonly string[] = [
   'geo.coast_distance',
   'data.indonesia_coastline',
   'navstatus.prediction',
-  // Proposed id (not in the catalog yet): track simplification of GET …/track?simplify=.
+  // Processor: track simplification of GET …/track?simplify= and …/pairs/track?simplify=.
   'geo.track_simplification',
 ];

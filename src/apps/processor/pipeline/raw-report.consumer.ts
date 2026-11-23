@@ -1,8 +1,11 @@
 import {
-  EventHandler,
   type ConsumerEnvelope,
+  DEFAULT_PINNED_TTL_MS,
+  EventHandler,
+  type ExclusiveConsumerEvent,
+  type ExclusiveConsumerListener,
 } from '@darmawanweb/ais-its-nest/nats';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 
 import { PositionPipelineService } from './position-pipeline.service.js';
 
@@ -10,16 +13,13 @@ import { PositionPipelineService } from './position-pipeline.service.js';
 export const RAW_REPORT_CONSUMER = 'ais-processor';
 
 /**
- * How long the server keeps the active instance pinned without a pull [ms].
- * It must stay well above the kit's pull expiry (30 s): a pull is renewed
- * when the previous one expires, and up to two missed heartbeats (another
- * 30 s) late when its expiry notice is lost, so a TTL ≤ 60 s unpins even a
- * healthy, idle single instance (a 30 s TTL did, stalling the next report
- * for ~40 s). The price is the failover delay: a crashed active instance is
- * replaced by a standby after up to this long; a graceful stop hands over
- * at once ({@link ExclusiveConsumerHandover}).
+ * How long the server keeps the active instance pinned without a pull [ms]:
+ * the kit's default (30 s). The kit pulls every TTL / 3 and heartbeats while
+ * idle, so an idle single instance keeps its pin; a crashed active instance
+ * is replaced by a standby after up to this long, a gracefully stopped one
+ * at once (the kit releases the pin on stop).
  */
-export const PROCESSOR_PINNED_TTL_MS = 90_000;
+export const PROCESSOR_PINNED_TTL_MS = DEFAULT_PINNED_TTL_MS;
 
 /**
  * Durable consumer `ais-processor` on AIS_RAW (spec §7.3).
@@ -30,10 +30,14 @@ export const PROCESSOR_PINNED_TTL_MS = 90_000;
  *   can only fill up with many messages in flight.
  * - `exclusive`: one active processor (per-vessel state in memory); further
  *   replicas stand by and take over when it stops pulling for
- *   {@link PROCESSOR_PINNED_TTL_MS} or hands over on shutdown.
+ *   {@link PROCESSOR_PINNED_TTL_MS}, or at once when it stops gracefully.
+ *   When this instance becomes the active one, the in-memory vessel states
+ *   are dropped before its first report ({@link onConsumerActivated}).
  */
 @Injectable()
-export class RawReportConsumer {
+export class RawReportConsumer implements ExclusiveConsumerListener {
+  private readonly logger = new Logger(RawReportConsumer.name);
+
   constructor(private readonly pipeline: PositionPipelineService) {}
 
   @EventHandler({
@@ -45,5 +49,19 @@ export class RawReportConsumer {
   })
   async onRawReport(event: ConsumerEnvelope<'ais-processor'>): Promise<void> {
     await this.pipeline.process(event.data);
+  }
+
+  /**
+   * This instance became the active processor: another instance may have
+   * recorded vessels while it stood by (failover, failback), so every
+   * vessel state it holds in memory is dropped; the next report of a
+   * vessel loads it from Valkey or the database. The kit dispatches the
+   * first report of the active period only after this returned.
+   */
+  onConsumerActivated(event: ExclusiveConsumerEvent): void {
+    const dropped = this.pipeline.resetVesselStates();
+    this.logger.log(
+      `${event.consumer} is active (pin ${event.pinId ?? '?'}${event.previous === undefined ? '' : `, previously ${event.previous}`}): dropped ${dropped} cached vessel state(s)`,
+    );
   }
 }

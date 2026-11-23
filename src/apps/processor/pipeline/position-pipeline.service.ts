@@ -74,6 +74,17 @@ export class PositionPipelineService {
   }
 
   /**
+   * Drops every vessel state held in memory (this instance became the
+   * active processor): the next report of each vessel reloads it from
+   * Valkey or the database, after any work still in flight for it settled.
+   *
+   * @returns the number of vessel states dropped
+   */
+  resetVesselStates(): number {
+    return this.tracker.reset();
+  }
+
+  /**
    * Handles one report; resolves when it is durably handled.
    *
    * @throws {NonRetryableError} for a position time no event id can carry (before 1970)

@@ -133,4 +133,49 @@ describe('PositionsService.latest', () => {
       expect.objectContaining({ since: new Date(T0 - 86_400_000) }),
     );
   });
+
+  it('looks up listed vessels whatever the age of their latest position (no default since), an explicit since still filters', async () => {
+    const { positions, repo } = service(0);
+    const mmsis = [525005223, 525005224];
+    await positions.latest({ ...query, mmsis, limit: 100 }, new Date(T0));
+    expect(repo.latest).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mmsis, since: undefined, limit: 101 }),
+    );
+    const since = new Date(T0 - 3_600_000);
+    await positions.latest({ ...query, since, mmsis, limit: 100 });
+    expect(repo.latest).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mmsis, since }),
+    );
+  });
+});
+
+describe('PositionsService.pairTrack', () => {
+  it('reads both tracks with the same range, resolution and simplification', async () => {
+    const { positions, repo } = service(5);
+    const tracks = await positions.pairTrack(525005223, 525005224, {
+      from: request.from,
+      to: request.to,
+      resolution: '1m',
+      simplifyM: 25,
+    });
+    expect(repo.minuteTrack).toHaveBeenCalledTimes(2);
+    expect(repo.rawTrack).not.toHaveBeenCalled();
+    expect(
+      tracks.map((track) => [track.mmsi, track.resolution, track.simplifyM]),
+    ).toEqual([
+      [525005223, '1m', 25],
+      [525005224, '1m', 25],
+    ]);
+  });
+
+  it('stays raw and unsimplified by default (legacy /ais/routes)', async () => {
+    const { positions, repo } = service(5);
+    const tracks = await positions.pairTrack(525005223, 525005224, {
+      from: request.from,
+      to: request.to,
+      resolution: 'raw',
+    });
+    expect(repo.rawTrack).toHaveBeenCalledTimes(2);
+    expect(tracks.map((track) => track.simplifyM)).toEqual([null, null]);
+  });
 });

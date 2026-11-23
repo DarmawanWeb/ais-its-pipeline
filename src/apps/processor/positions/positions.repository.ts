@@ -5,7 +5,7 @@ import {
   InjectDb,
 } from '@darmawanweb/ais-its-nest/db';
 import { Injectable } from '@nestjs/common';
-import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.js';
 import type { TrackPoint, VesselLatest } from './positions.model.js';
@@ -14,8 +14,11 @@ const { positions, positions1m, vesselLatest, vesselRefs } = schema;
 
 /** Filters of the latest positions. */
 export interface LatestFilter {
-  readonly since: Date;
+  /** Latest position at or after this time; `undefined` = any age. */
+  readonly since: Date | undefined;
   readonly bbox: BBox | undefined;
+  /** Only these vessels (`undefined` = all). */
+  readonly mmsis?: readonly number[] | undefined;
   readonly limit: number;
 }
 
@@ -84,7 +87,10 @@ function toLatest(row: LatestRow): VesselLatest {
 export class PositionsRepository {
   constructor(@InjectDb() private readonly db: Database<typeof schema>) {}
 
-  /** Latest positions, newest first (GiST index on `geom::geometry` for the bbox). */
+  /**
+   * Latest positions, newest first (GiST index on `geom::geometry` for the
+   * bbox, the primary key for `mmsis`).
+   */
   async latest(filter: LatestFilter): Promise<VesselLatest[]> {
     const rows = await this.db
       .select(latestColumns)
@@ -92,7 +98,12 @@ export class PositionsRepository {
       .leftJoin(vesselRefs, eq(vesselRefs.mmsi, vesselLatest.mmsi))
       .where(
         and(
-          gte(vesselLatest.time, filter.since),
+          filter.since === undefined
+            ? undefined
+            : gte(vesselLatest.time, filter.since),
+          filter.mmsis === undefined
+            ? undefined
+            : inArray(vesselLatest.mmsi, [...filter.mmsis]),
           filter.bbox === undefined
             ? undefined
             : geographyIntersectsBBox(vesselLatest.geom, filter.bbox),

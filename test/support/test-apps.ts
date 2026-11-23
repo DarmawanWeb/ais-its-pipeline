@@ -33,6 +33,7 @@ import {
 } from '../../src/apps/ingestor/config.js';
 import { IngestorModule } from '../../src/apps/ingestor/ingestor.module.js';
 import { INGESTOR_OPENAPI } from '../../src/apps/ingestor/openapi.options.js';
+import { PROCESSOR_CORS } from '../../src/apps/processor/bootstrap.js';
 import {
   type ProcessorConfig,
   processorConfigSchema,
@@ -171,6 +172,7 @@ export async function startProcessor(
   const app = await buildTestApp(ProcessorModule, {
     config,
     openapi: PROCESSOR_OPENAPI,
+    cors: PROCESSOR_CORS,
     overrides: [
       { provide: ACCESS_TOKEN_KEY_RESOLVER, useValue: auth.jwt.keyResolver },
     ],

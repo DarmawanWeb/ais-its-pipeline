@@ -68,29 +68,72 @@ export const vesselRefs = serviceSchema.table(
 );
 
 /**
- * Transactional outbox of `ais.position.recorded.v1` (`0003_outbox.sql`, the
- * kit's `outboxTableSql()`): written by the position batches, read and
- * published by the kit's `OutboxRelay`.
+ * Transactional outbox of `ais.position.recorded.v1` (`0003_outbox.sql`,
+ * upgraded for the kit's per-key relay by `0004_outbox_per_key.sql`): written
+ * by the position batches, read and published by the kit's `OutboxRelay`
+ * (entity key = MMSI, `seq` order per vessel).
  */
 export const outbox = serviceSchema.table(
   'outbox',
   {
     id: pg.uuid('id').primaryKey(),
+    seq: pg
+      .bigint('seq', { mode: 'number' })
+      .notNull()
+      .generatedByDefaultAsIdentity(),
     type: pg.text('type').notNull(),
     entityKey: pg.text('entity_key'),
     data: pg.jsonb('data').notNull(),
     createdAt: timestamptz('created_at').notNull().defaultNow(),
     attempts: pg.integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamptz('next_attempt_at'),
     lastError: pg.text('last_error'),
     publishedAt: timestamptz('published_at'),
     failedAt: timestamptz('failed_at'),
   },
   (table) => [
+    pg.unique('outbox_seq_key').on(table.seq),
     pg
       .index('outbox_pending_idx')
       .on(table.createdAt, table.id)
       .where(sql`published_at IS NULL AND failed_at IS NULL`),
+    pg
+      .index('outbox_pending_seq_idx')
+      .on(table.seq)
+      .where(sql`published_at IS NULL AND failed_at IS NULL`),
+    pg
+      .index('outbox_pending_key_idx')
+      .on(table.entityKey, table.seq)
+      .where(sql`published_at IS NULL AND failed_at IS NULL`),
+    pg
+      .index('outbox_retry_idx')
+      .on(table.entityKey, table.seq)
+      .where(
+        sql`published_at IS NULL AND failed_at IS NULL AND next_attempt_at IS NOT NULL`,
+      ),
+    pg
+      .index('outbox_failed_idx')
+      .on(table.failedAt)
+      .where(sql`failed_at IS NOT NULL`),
   ],
+);
+
+/**
+ * Traffic counters per minute and feed, the sampled history of
+ * `GET /ais/stats` (hypertable, `0005_traffic_minutes.sql`).
+ */
+export const trafficMinutes = serviceSchema.table(
+  'traffic_minutes',
+  {
+    minute: timestamptz('minute').notNull(),
+    source: pg
+      .text('source', { enum: ['primary', 'batam', 'pusher'] })
+      .notNull(),
+    messages: pg.integer('messages').notNull(),
+    activeVessels: pg.integer('active_vessels').notNull(),
+    sampledAt: timestamptz('sampled_at').notNull().defaultNow(),
+  },
+  (table) => [pg.primaryKey({ columns: [table.minute, table.source] })],
 );
 
 /** One-minute continuous aggregate of `positions` (`0002_positions_1m.sql`). */

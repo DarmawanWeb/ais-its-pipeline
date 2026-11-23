@@ -19,6 +19,8 @@ export const LATEST_DEFAULT_WINDOW_MS = DAY_MS;
 /** Default and largest `limit` of `GET /ais/latest`. */
 export const LATEST_DEFAULT_LIMIT = 10_000;
 export const LATEST_MAX_LIMIT = 50_000;
+/** Most MMSIs of one `GET /ais/latest?mmsi=` batch lookup (a page of a vessel list). */
+export const LATEST_MAX_MMSIS = 100;
 /** Default track range (last 24 h) and the longest range per resolution (spec: raw ≤ 7 d). */
 export const TRACK_DEFAULT_RANGE_MS = DAY_MS;
 export const TRACK_MAX_RANGE_MS: Readonly<Record<TrackResolution, number>> = {
@@ -31,14 +33,28 @@ export const TRACK_MAX_RANGE_MS: Readonly<Record<TrackResolution, number>> = {
  */
 export const TRACK_MAX_POINTS = 100_000;
 
-/** A resolved track request. */
-export interface TrackRequest {
-  readonly mmsi: number;
+/** Range, resolution and simplification of a track request. */
+export interface TrackOptions {
   readonly from: Date;
   readonly to: Date;
   readonly resolution: TrackResolution;
   /** Douglas–Peucker tolerance [m]; 0 or `undefined` = none. */
   readonly simplifyM?: number | undefined;
+}
+
+/** A resolved track request. */
+export interface TrackRequest extends TrackOptions {
+  readonly mmsi: number;
+}
+
+/** Filters of a `GET /ais/latest` request. */
+export interface LatestQuery {
+  readonly bbox: BBox | undefined;
+  /** Default 24 h ago, none with {@link mmsis}. */
+  readonly since: Date | undefined;
+  /** Only these vessels (batch lookup, at most {@link LATEST_MAX_MMSIS}). */
+  readonly mmsis?: readonly number[] | undefined;
+  readonly limit: number;
 }
 
 /** Latest positions of a `GET /ais/latest` request. */
@@ -57,19 +73,23 @@ export class PositionsService {
   /**
    * Latest position of every vessel seen since `since` (default 24 h),
    * inside `bbox`, newest first; one row more than `limit` is read to tell
-   * whether the result is complete.
+   * whether the result is complete. With `mmsis` only those vessels are
+   * returned (those never recorded are omitted), and `since` has no
+   * default: a vessel list shows when each vessel was last seen, however
+   * long ago.
    */
   async latest(
-    query: {
-      readonly bbox: BBox | undefined;
-      readonly since: Date | undefined;
-      readonly limit: number;
-    },
+    query: LatestQuery,
     now: Date = new Date(),
   ): Promise<LatestPositions> {
     const rows = await this.repository.latest({
       bbox: query.bbox,
-      since: query.since ?? new Date(now.getTime() - LATEST_DEFAULT_WINDOW_MS),
+      since:
+        query.since ??
+        (query.mmsis === undefined
+          ? new Date(now.getTime() - LATEST_DEFAULT_WINDOW_MS)
+          : undefined),
+      mmsis: query.mmsis,
       limit: query.limit + 1,
     });
     return {
@@ -132,17 +152,18 @@ export class PositionsService {
     };
   }
 
-  /** Raw tracks of two vessels over the same range (legacy `GET /ais/routes/:mmsi1/:mmsi2`). */
+  /**
+   * Tracks of two vessels over the same range, resolution and
+   * simplification (legacy `GET /ais/routes/:mmsi1/:mmsi2`, raw by default),
+   * each limited and truncated like {@link track}.
+   */
   async pairTrack(
     mmsi1: number,
     mmsi2: number,
-    from: Date,
-    to: Date,
+    options: TrackOptions,
   ): Promise<readonly Track[]> {
     return Promise.all(
-      [mmsi1, mmsi2].map((mmsi) =>
-        this.track({ mmsi, from, to, resolution: 'raw' }),
-      ),
+      [mmsi1, mmsi2].map((mmsi) => this.track({ ...options, mmsi })),
     );
   }
 }

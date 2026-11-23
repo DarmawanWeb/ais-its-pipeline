@@ -300,15 +300,16 @@ function isTimeStampSecond(utc: number): boolean {
  * (receiver clock behind the GNSS clock); a time stamp of 60 (not
  * available), 61 (manual input), 62 (dead reckoning) or 63 (positioning
  * system inoperative), or any other value, leaves the message timestamp.
- * This is the reconstruction the methodology proposes for the unconfirmed
- * meaning of `utc` (catalog notes of `data.ais_ingest_rules`).
+ * This is the reconstruction of `data.ais_position_time` for the
+ * unconfirmed meaning of `utc` (the legacy reading stays the default,
+ * `data.ais_ingest_rules`).
  *
- * @method data.ais_ingest_rules
+ * @method data.ais_position_time
  * @param timestamp - reception timestamp of the upstream message
  * @param utc - `data.utc`, time stamp second [s]
  * @param toleranceMs - clock tolerance [ms]
  * @returns position time (whole second), or `timestamp` without a time stamp second
- * @see ../../../../../docs/METHODOLOGY.md#data.ais_ingest_rules
+ * @see ../../../../../docs/METHODOLOGY.md#data.ais_position_time
  * @see itu-r-m1371-5 (position report "Time stamp", reference catalog)
  * @see gpsd-aivdm-protocol (common navigation block bits 137-142, reference catalog)
  */
@@ -330,11 +331,11 @@ export function ituPositionTime(
  * (legacy reading) or a constant they spread over the whole minute
  * (metric `aisits_ais_utc_second_lag_seconds` of the ingestor).
  *
- * @method data.ais_ingest_rules
+ * @method data.ais_position_time
  * @param timestamp - reception timestamp of the upstream message
  * @param utc - `data.utc`
  * @returns lag [s], 0–59, or `null`
- * @see ../../../../../docs/METHODOLOGY.md#data.ais_ingest_rules
+ * @see ../../../../../docs/METHODOLOGY.md#data.ais_position_time
  */
 export function utcSecondLag(timestamp: Date, utc: number): number | null {
   if (!isTimeStampSecond(utc)) return null;
@@ -366,8 +367,8 @@ interface PositionTime {
  * one (often epoch seconds sent as milliseconds) would create hypertable
  * chunks in the past.
  *
- * @method data.ais_ingest_rules
- * @see ../../../../../docs/METHODOLOGY.md#data.ais_ingest_rules
+ * @method data.ais_position_time (plausibility window; the legacy reading itself is {@link legacyPositionTime})
+ * @see ../../../../../docs/METHODOLOGY.md#data.ais_position_time
  */
 function positionTimeOf(
   fields: RawFields,

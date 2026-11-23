@@ -32,14 +32,24 @@ interface FakeUpstream {
   readonly tokens: unknown[];
 }
 
-async function startUpstream(port = 0): Promise<FakeUpstream> {
+/**
+ * Starts a fake upstream on `port` (0: any). `authDelayMs` delays its auth
+ * middleware like a real token check: the engine.io connection (counted by
+ * `io.engine.clientsCount`) then exists well before the client's socket.io
+ * `connect`, which is what the ingestor's state and metrics follow.
+ */
+async function startUpstream(
+  port = 0,
+  { authDelayMs = 0 }: { authDelayMs?: number } = {},
+): Promise<FakeUpstream> {
   const http = createServer();
   const io = new Server(http, { transports: ['websocket'] });
   const tokens: unknown[] = [];
   io.use((socket, next) => {
     const auth: Record<string, unknown> = socket.handshake.auth;
     tokens.push(auth.token);
-    next();
+    if (authDelayMs === 0) next();
+    else setTimeout(next, authDelayMs);
   });
   await new Promise<void>((resolve) => {
     http.listen(port, '127.0.0.1', resolve);
@@ -58,6 +68,22 @@ async function stopUpstream(upstream: FakeUpstream): Promise<void> {
       resolve();
     });
   });
+}
+
+/**
+ * Whether the ingestor's client of `source` is connected: its socket.io
+ * `connect` (after the namespace handshake) sets the gauge, unlike the
+ * server-side `io.engine.clientsCount`, which counts the engine.io
+ * connection before that handshake completes.
+ */
+async function upstreamConnected(
+  ingestor: TestIngestor,
+  source: 'primary' | 'batam',
+): Promise<boolean> {
+  const metrics = await ingestor.app.inject({ url: '/metrics' });
+  return metrics.body.includes(
+    `aisits_ais_upstream_connected{source="${source}"} 1`,
+  );
 }
 
 /** Raw reports of a feed stored since `from`. */
@@ -136,10 +162,11 @@ describe('ingestor: upstream socket.io feeds and the pusher endpoint', () => {
       },
       { listen: true },
     );
+    // Connected as the client sees it, not just the engine.io handshake.
     await waitFor(
-      () =>
-        primary.io.engine.clientsCount === 1 &&
-        batam.io.engine.clientsCount === 1,
+      async () =>
+        (await upstreamConnected(ingestor, 'primary')) &&
+        (await upstreamConnected(ingestor, 'batam')),
       { timeoutMs: 10_000 },
     );
   });
@@ -226,8 +253,13 @@ describe('ingestor: upstream socket.io feeds and the pusher endpoint', () => {
 
     const port = primary.port;
     await stopUpstream(primary);
-    primary = await startUpstream(port);
+    // The restarted server checks the token for 500 ms: its engine.io
+    // connection is counted that long before the client is connected.
+    primary = await startUpstream(port, { authDelayMs: 500 });
     await waitFor(() => primary.io.engine.clientsCount === 1, {
+      timeoutMs: 15_000,
+    });
+    await waitFor(() => upstreamConnected(ingestor, 'primary'), {
       timeoutMs: 15_000,
     });
 

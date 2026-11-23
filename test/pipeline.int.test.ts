@@ -6,10 +6,16 @@ import {
   subjects,
 } from '@darmawanweb/ais-its-contracts/events';
 import { APP_CONFIG } from '@darmawanweb/ais-its-nest';
-import { makeTestVesselSnapshot } from '@darmawanweb/ais-its-nest/analytics';
-import { EventPublisher, NatsClient } from '@darmawanweb/ais-its-nest/nats';
+import {
+  EventPublisher,
+  NatsClient,
+  OutboxRelay,
+} from '@darmawanweb/ais-its-nest/nats';
 import { REDIS_CLIENT, type Redis } from '@darmawanweb/ais-its-nest/redis';
-import { waitFor } from '@darmawanweb/ais-its-nest/testing';
+import {
+  makeTestVesselSnapshot,
+  waitFor,
+} from '@darmawanweb/ais-its-nest/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { CoastlineService } from '../src/apps/processor/coastline/coastline.service.js';
@@ -151,7 +157,7 @@ describe('processor: AIS_RAW → positions, vessel_latest, Valkey, AIS_POSITION'
     await auth.close();
   });
 
-  it('is ready with PostgreSQL, NATS and Valkey; migrations created the hypertable, its policies and the 1-minute aggregate', async () => {
+  it('is ready with PostgreSQL, NATS and Valkey; migrations created the hypertables, their policies, the 1-minute aggregate and the per-key outbox', async () => {
     const ready = await processor.app.inject({ url: '/health/ready' });
     expect(ready.statusCode).toBe(200);
     expect(ready.json()).toMatchObject({
@@ -169,17 +175,23 @@ describe('processor: AIS_RAW → positions, vessel_latest, Valkey, AIS_POSITION'
       'init',
       'positions_1m',
       'outbox',
+      'outbox_per_key',
+      'traffic_minutes',
     ]);
+    // 0004 upgraded the kit 0.2 table: every replica relays per vessel.
+    expect(await processor.app.get(OutboxRelay).mode()).toBe('per-key');
 
     const hypertables = await processor.pool.query<{
       hypertable_name: string;
       compression_enabled: boolean;
     }>(
       `SELECT hypertable_name, compression_enabled
-       FROM timescaledb_information.hypertables WHERE hypertable_schema = 'ais'`,
+       FROM timescaledb_information.hypertables WHERE hypertable_schema = 'ais'
+       ORDER BY hypertable_name`,
     );
     expect(hypertables.rows).toEqual([
       { hypertable_name: 'positions', compression_enabled: true },
+      { hypertable_name: 'traffic_minutes', compression_enabled: false },
     ]);
 
     const jobs = await processor.pool.query<{
@@ -203,6 +215,7 @@ describe('processor: AIS_RAW → positions, vessel_latest, Valkey, AIS_POSITION'
       ['positions_1m', 'policy_compression', '7 days'],
       ['positions_1m', 'policy_refresh_continuous_aggregate', '2 days'],
       ['positions_1m', 'policy_retention', '5 years'],
+      ['traffic_minutes', 'policy_retention', '1 year'],
     ]);
   });
 

@@ -197,7 +197,7 @@ export class TrackDto {
   }
 }
 
-/** Raw tracks of two vessels over the same range. */
+/** Tracks of two vessels over the same range, resolution and simplification. */
 export class PairTrackDto {
   @ApiProperty({ format: 'date-time' })
   readonly from: string;

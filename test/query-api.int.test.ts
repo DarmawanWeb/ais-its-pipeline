@@ -2,6 +2,7 @@ import { waitFor } from '@darmawanweb/ais-its-nest/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { PositionsRepository } from '../src/apps/processor/positions/positions.repository.js';
+import { TrafficSampler } from '../src/apps/processor/stats/traffic-sampler.js';
 import { moved, normalizedMessage } from './support/messages.js';
 import {
   purgeStreams,
@@ -210,9 +211,63 @@ describe('processor: AIS query API', () => {
       status: 404,
       type: 'urn:ais-its:problem:ais-position-not-found',
     });
-    expect((await get('/api/v2/ais/vessels/12345/latest')).statusCode).toBe(
-      400,
+    // Path parameters are nine-digit MMSIs (kit @MmsiParam): field errors.
+    for (const mmsi of ['12345', '0525005223', '5250052e3']) {
+      const invalid = await get(`/api/v2/ais/vessels/${mmsi}/latest`);
+      expect(invalid.statusCode, mmsi).toBe(400);
+      expect(invalid.json(), mmsi).toMatchObject({
+        code: 'VALIDATION_FAILED',
+        errors: [{ field: 'mmsi', code: 'isMmsi' }],
+      });
+    }
+  });
+
+  it('GET /ais/latest?mmsi=: batch lookup of listed vessels whatever their age, unknown ones omitted', async () => {
+    const batch = await get(
+      `/api/v2/ais/latest?mmsi=${STALE},${TRACKED},525009999,${TRACKED}`,
     );
+    expect(batch.statusCode).toBe(200);
+    expect(batch.headers['x-truncated']).toBe('false');
+    // Newest first; the vessel last seen two days ago is included (no default since).
+    expect(
+      batch
+        .json<{ mmsi: number; time: string }[]>()
+        .map((vessel) => [vessel.mmsi, vessel.time]),
+    ).toEqual([
+      [TRACKED, trackTime(40)],
+      [STALE, new Date(now - 2 * 86_400_000).toISOString()],
+    ]);
+    // An explicit since still filters.
+    const since = new Date(now - 3_600_000).toISOString();
+    const recent = await get(
+      `/api/v2/ais/latest?mmsi=${STALE},${TRACKED}&since=${since}`,
+    );
+    expect(recent.json<{ mmsi: number }[]>().map((v) => v.mmsi)).toEqual([
+      TRACKED,
+    ]);
+    // Repeated parameters work too.
+    const repeated = await get(
+      `/api/v2/ais/latest?mmsi=${BATAM}&mmsi=${TRACKED}`,
+    );
+    expect(repeated.json<{ mmsi: number }[]>().map((v) => v.mmsi)).toEqual([
+      BATAM,
+      TRACKED,
+    ]);
+
+    const tooMany = Array.from({ length: 101 }, (_, i) => 525_100_000 + i);
+    for (const [mmsi, code] of [
+      ['', 'isMmsi'],
+      ['12345', 'isMmsi'],
+      [`${TRACKED},0525005223`, 'isMmsi'],
+      [tooMany.join(','), 'arrayMaxSize'],
+    ] as const) {
+      const invalid = await get(`/api/v2/ais/latest?mmsi=${mmsi}`);
+      expect(invalid.statusCode, mmsi).toBe(400);
+      expect(invalid.json(), mmsi).toMatchObject({
+        code: 'VALIDATION_FAILED',
+        errors: [{ field: 'mmsi', code }],
+      });
+    }
   });
 
   it('GET /ais/vessels/:mmsi/track: raw positions of the last 24 h in time order, a range, and Douglas–Peucker simplification', async () => {
@@ -317,6 +372,43 @@ describe('processor: AIS query API', () => {
     expect((await get('/api/v2/ais/pairs/track?mmsi1=1')).statusCode).toBe(400);
   });
 
+  it('GET /ais/pairs/track: the resolution and simplification of the vessel track for both vessels', async () => {
+    const pair = (query: string) =>
+      get(`/api/v2/ais/pairs/track?mmsi1=${TRACKED}&mmsi2=${BATAM}&${query}`);
+    const minutes = (await pair('resolution=1m')).json<{
+      tracks: TrackBody[];
+    }>();
+    expect(minutes.tracks.map((track) => track.resolution)).toEqual([
+      '1m',
+      '1m',
+    ]);
+    const [tracked, batam] = minutes.tracks;
+    expect(tracked?.points.length).toBeGreaterThanOrEqual(10);
+    expect(tracked?.points.length).toBeLessThanOrEqual(11);
+    expect(
+      tracked?.points.reduce((sum, point) => sum + (point.samples ?? 0), 0),
+    ).toBe(41);
+    expect(
+      batam?.points.reduce((sum, point) => sum + (point.samples ?? 0), 0),
+    ).toBe(2);
+
+    const simplified = (await pair('simplify=50')).json<{
+      tracks: TrackBody[];
+    }>();
+    expect(simplified.tracks.map((track) => track.simplifyM)).toEqual([50, 50]);
+    expect(simplified.tracks[0]?.points.map((point) => point.time)).toEqual(
+      [0, 19, 20, 21, 40].map((i) => trackTime(i)),
+    );
+
+    // The range limit follows the resolution: raw ≤ 7 days, 1m ≤ 90 days.
+    const eightDaysAgo = new Date(now - 8 * 86_400_000).toISOString();
+    expect((await pair(`from=${eightDaysAgo}`)).statusCode).toBe(400);
+    expect((await pair(`from=${eightDaysAgo}&resolution=1m`)).statusCode).toBe(
+      200,
+    );
+    expect((await pair('resolution=5m')).statusCode).toBe(400);
+  });
+
   it('GET /ais/stats: active vessels (10 min) and positions of the last minute, by feed', async () => {
     const stats = (await get('/api/v2/ais/stats')).json<
       Record<string, unknown>
@@ -333,6 +425,91 @@ describe('processor: AIS query API', () => {
     });
   });
 
+  it('GET /ais/stats/series: the sampled history of /ais/stats per minute and in 5-minute buckets, by feed', async () => {
+    const sampler = processor.app.get(TrafficSampler);
+    // Five full minutes inside the tracked vessel's reports (4 per minute).
+    const first = Math.ceil(trackStart() / 60_000) * 60_000;
+    const minutes = [0, 1, 2, 3, 4].map((i) => new Date(first + i * 60_000));
+    for (const minute of minutes)
+      expect(await sampler.sample(minute)).toBe('recorded');
+    // Another replica sampling the same minute changes nothing.
+    expect(await sampler.sample(minutes[0])).toBe('exists');
+
+    const from = new Date(first).toISOString();
+    const to = new Date(first + 5 * 60_000).toISOString();
+    const response = await get(
+      `/api/v2/ais/stats/series?from=${from}&to=${to}`,
+    );
+    expect(response.statusCode).toBe(200);
+    const series = response.json<{
+      from: string;
+      to: string;
+      bucket: string;
+      bucketMinutes: number;
+      activeWindowMinutes: number;
+      points: {
+        at: string;
+        samples: number;
+        messages: number;
+        activeVessels: number;
+        bySource: Record<string, { messages: number; activeVessels: number }>;
+      }[];
+    }>();
+    expect(series).toMatchObject({
+      from,
+      to,
+      bucket: '1m',
+      bucketMinutes: 1,
+      activeWindowMinutes: 10,
+    });
+    // Active at the end of each minute: the tracked vessel and Batam (the
+    // stale vessel's latest position is two days old).
+    expect(
+      series.points.map((point) => [
+        point.at,
+        point.samples,
+        point.messages,
+        point.activeVessels,
+      ]),
+    ).toEqual(minutes.map((minute) => [minute.toISOString(), 1, 4, 2]));
+    expect(series.points[0]?.bySource).toEqual({
+      primary: { messages: 0, activeVessels: 0 },
+      batam: { messages: 0, activeVessels: 0 },
+      pusher: { messages: 4, activeVessels: 2 },
+    });
+
+    const coarse = (
+      await get(`/api/v2/ais/stats/series?from=${from}&to=${to}&bucket=5m`)
+    ).json<typeof series>();
+    expect(coarse.bucketMinutes).toBe(5);
+    expect(new Date(coarse.from).getTime() % 300_000).toBe(0);
+    expect(coarse.points.length).toBeGreaterThanOrEqual(1);
+    expect(coarse.points.length).toBeLessThanOrEqual(2);
+    expect(coarse.points.reduce((sum, p) => sum + p.samples, 0)).toBe(5);
+    expect(coarse.points.reduce((sum, p) => sum + p.messages, 0)).toBe(20);
+    expect(coarse.points.every((p) => p.activeVessels === 2)).toBe(true);
+
+    // Defaults, permissions and limits.
+    const latest = await get('/api/v2/ais/stats/series', {
+      'x-api-key': auth.apiKey(['ais:read']),
+    });
+    expect(latest.statusCode).toBe(200);
+    expect(latest.json()).toMatchObject({ bucket: '1m' });
+    expect((await get('/api/v2/ais/stats/series', {})).statusCode).toBe(401);
+    const twoDaysAgo = new Date(now - 2 * 86_400_000).toISOString();
+    for (const query of ['bucket=2m', `from=${twoDaysAgo}`, 'from=yesterday']) {
+      const invalid = await get(`/api/v2/ais/stats/series?${query}`);
+      expect(invalid.statusCode, query).toBe(400);
+      expect(invalid.json(), query).toMatchObject({
+        code: 'VALIDATION_FAILED',
+      });
+    }
+    expect(
+      (await get(`/api/v2/ais/stats/series?from=${twoDaysAgo}&bucket=5m`))
+        .statusCode,
+    ).toBe(200);
+  });
+
   it('GET /ais/methodology: the catalog methods this repository implements', async () => {
     const response = await get('/api/v2/ais/methodology');
     expect(response.statusCode).toBe(200);
@@ -344,6 +521,8 @@ describe('processor: AIS query API', () => {
     expect(body.methods.map((method) => method.id)).toEqual(
       expect.arrayContaining([
         'data.ais_ingest_rules',
+        'data.ais_position_time',
+        'geo.track_simplification',
         'navstatus.prediction',
         'geo.coast_distance',
         'data.indonesia_coastline',
@@ -362,6 +541,7 @@ describe('processor: AIS query API', () => {
         '/api/v2/ais/methodology',
         '/api/v2/ais/pairs/track',
         '/api/v2/ais/stats',
+        '/api/v2/ais/stats/series',
         '/api/v2/ais/vessels/{mmsi}/latest',
         '/api/v2/ais/vessels/{mmsi}/track',
       ].sort(),
